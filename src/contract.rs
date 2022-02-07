@@ -14,14 +14,16 @@ use crate::msg::{
 };
 use crate::rand::sha_256;
 use crate::receiver::Snip20ReceiveMsg;
-use crate::state::{get_receiver_hash, read_allowance, read_viewing_key, set_receiver_hash, write_allowance, write_viewing_key, Balances, Config, Constants, ReadonlyBalances, ReadonlyConfig, stake_config_w, total_staked_w, distributors_transfer_w, distributors_w};
+use crate::state::{get_receiver_hash, read_allowance, read_viewing_key, set_receiver_hash, write_allowance, write_viewing_key, Balances, Config, Constants, ReadonlyBalances, ReadonlyConfig};
 use crate::transaction_history::{
     get_transfers, get_txs, store_burn, store_deposit, store_mint, store_redeem, store_transfer,
 };
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
 use secret_toolkit::snip20::register_receive_msg;
-use shade_protocol::shd_staking::stake::StakeConfig;
+use shade_protocol::shd_staking::stake::{Distributors, DistributorsEnabled, StakeConfig, TotalStaked};
+use shade_protocol::storage::SingletonStorage;
+use crate::distributors::{try_add_distributors, try_set_distributors};
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -102,18 +104,18 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     config.set_minters(minters)?;
 
     // Set distributors
-    distributors_transfer_w(&mut deps.storage).save(&msg.limit_transfer)?;
-    distributors_w(&mut deps.storage).save(&msg.distributors.unwrap_or(vec![]))?;
+    Distributors(msg.distributors.unwrap_or(vec![])).save(&mut deps.storage)?;
+    DistributorsEnabled(msg.limit_transfer).save(&mut deps.storage)?;
 
     // Set stake config
-    stake_config_w(&mut deps.storage).save(&StakeConfig{
+    StakeConfig{
         unbond_time: msg.unbond_time,
         staked_token: msg.staked_token,
         treasury: None
-    })?;
+    }.save(&mut deps.storage)?;
 
     // Set staked state to 0
-    total_staked_w(&mut deps.storage).save(&Uint128::zero())?;
+    TotalStaked(0).save(&mut deps.storage)?;
 
     // Register receive if necessary
     let mut messages = vec![];
@@ -1640,7 +1642,7 @@ fn is_admin<S: Storage>(config: &Config<S>, account: &HumanAddr) -> StdResult<bo
     Ok(true)
 }
 
-fn check_if_admin<S: Storage>(config: &Config<S>, account: &HumanAddr) -> StdResult<()> {
+pub fn check_if_admin<S: Storage>(config: &Config<S>, account: &HumanAddr) -> StdResult<()> {
     if !is_admin(config, account)? {
         return Err(StdError::generic_err(
             "This is an admin command. Admin commands can only be run from admin address",
