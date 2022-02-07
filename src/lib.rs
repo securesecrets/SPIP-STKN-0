@@ -7,6 +7,9 @@ pub mod state;
 mod transaction_history;
 mod utils;
 mod viewing_key;
+mod stake;
+mod expose_balance;
+mod distributors;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {

@@ -8,6 +8,9 @@ use crate::transaction_history::{RichTx, Tx};
 use crate::viewing_key::ViewingKey;
 use cosmwasm_std::{Binary, HumanAddr, StdError, StdResult, Uint128};
 use secret_toolkit::permit::Permit;
+use shade_protocol::asset::Contract;
+use shade_protocol::shd_staking::stake::StakeConfig;
+use crate::staking::StakeConfig;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
 pub struct InitialBalance {
@@ -24,6 +27,16 @@ pub struct InitMsg {
     pub initial_balances: Option<Vec<InitialBalance>>,
     pub prng_seed: Binary,
     pub config: Option<InitConfig>,
+
+    // Stake
+    pub unbond_time: u64,
+    pub staked_token: Contract,
+    pub treasury: Option<HumanAddr>,
+    pub treasury_code_hash: Option<String>,
+
+    // Distributors
+    pub limit_transfer: bool,
+    pub distributors: Option<Vec<HumanAddr>>
 }
 
 impl InitMsg {
@@ -41,12 +54,6 @@ pub struct InitConfig {
     /// Indicates whether the total supply is public or should be kept secret.
     /// default: False
     public_total_supply: Option<bool>,
-    /// Indicates whether deposit functionality should be enabled
-    /// default: False
-    enable_deposit: Option<bool>,
-    /// Indicates whether redeem functionality should be enabled
-    /// default: False
-    enable_redeem: Option<bool>,
     /// Indicates whether mint functionality should be enabled
     /// default: False
     enable_mint: Option<bool>,
@@ -58,14 +65,6 @@ pub struct InitConfig {
 impl InitConfig {
     pub fn public_total_supply(&self) -> bool {
         self.public_total_supply.unwrap_or(false)
-    }
-
-    pub fn deposit_enabled(&self) -> bool {
-        self.enable_deposit.unwrap_or(false)
-    }
-
-    pub fn redeem_enabled(&self) -> bool {
-        self.enable_redeem.unwrap_or(false)
     }
 
     pub fn mint_enabled(&self) -> bool {
@@ -80,14 +79,53 @@ impl InitConfig {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleMsg {
-    // Native coin interactions
-    Redeem {
-        amount: Uint128,
-        denom: Option<String>,
-        padding: Option<String>,
+    // Staking
+    UpdateStakeConfig {
+        unbond_time: Option<u64>,
+        staked_token: Option<Contract>,
+        disable_treasury: bool,
+        treasury: Option<HumanAddr>,
+        treasury_code_hash: Option<String>,
+        padding: String
     },
-    Deposit {
-        padding: Option<String>,
+    Receive {
+        sender: HumanAddr,
+        from: HumanAddr,
+        amount: Uint128,
+        msg: Option<String>,
+        padding: String
+    },
+    Unbond {
+        amount: Uint128,
+        padding: String
+    },
+    ClaimUnbond {
+        padding: String
+    },
+    ClaimRewards {
+        padding: String
+    },
+    StakeRewards {
+        padding: String
+    },
+
+    // Balance
+    ExposeBalance {
+        recipient: HumanAddr,
+        code_hash: String,
+        msg: Option<Binary>,
+        memo: Option<String>,
+        padding: String
+    },
+
+    // Distributors
+    AddDistributors {
+        distributors: Vec<String>,
+        padding: String
+    },
+    SetDistributors {
+        distributors: Vec<String>,
+        padding: String
     },
 
     // Base ERC-20 stuff
@@ -223,13 +261,15 @@ pub enum HandleMsg {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleAnswer {
-    // Native
-    Deposit {
-        status: ResponseStatus,
-    },
-    Redeem {
-        status: ResponseStatus,
-    },
+    UpdateStakeConfig { status: ResponseStatus },
+    Receive { status: ResponseStatus },
+    Unbond { status: ResponseStatus },
+    ClaimUnbond { status: ResponseStatus },
+    ClaimRewards { status: ResponseStatus },
+    StakeRewards { status: ResponseStatus },
+    ExposeBalance { status: ResponseStatus },
+    AddDistributors { status: ResponseStatus },
+    SetDistributors { status: ResponseStatus },
 
     // Base
     Transfer {
@@ -321,6 +361,23 @@ pub enum HandleAnswer {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
+    // Staking
+    StakeConfig {},
+    TotalStaked {},
+    Unbonding {
+        start: u64,
+        end: u64
+    },
+    Staked {
+        address: HumanAddr,
+        key: String,
+        time: u64,
+    },
+
+    // Distributors
+    Distributors {},
+
+    // Snip20 stuff
     TokenInfo {},
     TokenConfig {},
     ContractStatus {},
@@ -375,6 +432,11 @@ impl QueryMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryWithPermit {
+    Staked {
+        time: u64,
+    },
+
+    // Snip20 stuff
     Allowance {
         owner: HumanAddr,
         spender: HumanAddr,
@@ -393,6 +455,31 @@ pub enum QueryWithPermit {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryAnswer {
+    // Stake
+    StakedConfig {
+        config: StakeConfig,
+    },
+    TotalStaked {
+        tokens: Uint128,
+        shares: Uint128
+    },
+    Staked {
+        tokens: Uint128,
+        shares: Uint128,
+        pending_rewards: Uint128,
+        unbonding: Uint128,
+        unbonded: Uint128
+    },
+    Unbonding {
+        total: Uint128
+    },
+
+    // Distributors
+    Distributors {
+        distributors: Vec<HumanAddr>
+    },
+
+    // Snip20 stuff
     TokenInfo {
         name: String,
         symbol: String,

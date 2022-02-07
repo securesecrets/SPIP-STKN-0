@@ -1,8 +1,8 @@
 use std::any::type_name;
 use std::convert::TryFrom;
 
-use cosmwasm_std::{CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage};
-use cosmwasm_storage::{PrefixedStorage, ReadonlyPrefixedStorage};
+use cosmwasm_std::{CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage, Uint128};
+use cosmwasm_storage::{bucket, Bucket, bucket_read, PrefixedStorage, ReadonlyBucket, ReadonlyPrefixedStorage, ReadonlySingleton, singleton, Singleton, singleton_read};
 
 use secret_toolkit::storage::{TypedStore, TypedStoreMut};
 
@@ -12,7 +12,18 @@ use serde::{Deserialize, Serialize};
 use crate::msg::{status_level_to_u8, u8_to_status_level, ContractStatusLevel};
 use crate::viewing_key::ViewingKey;
 use serde::de::DeserializeOwned;
+use shade_protocol::shd_staking::stake::StakeConfig;
 
+// Staking
+const STAKE_CONFIG_KEY: &[u8] = b"stake_config";
+const TOTAL_STAKED_KEY: &[u8] = b"total_Staked";
+const USER_STAKED_KEY: &[u8] = b"user_staked";
+
+// Distributors
+const DISTRIBUTORS_KEY: &[u8] = b"distributors";
+const DISTRIBUTORS_TRANSFER_KEY: &[u8] = b"distributors_transfer";
+
+// Snip20
 pub static CONFIG_KEY: &[u8] = b"config";
 pub const PREFIX_TXS: &[u8] = b"transfers";
 
@@ -28,6 +39,52 @@ pub const PREFIX_ALLOWANCES: &[u8] = b"allowances";
 pub const PREFIX_VIEW_KEY: &[u8] = b"viewingkey";
 pub const PREFIX_RECEIVERS: &[u8] = b"receivers";
 
+// Stake info
+pub fn stake_config_w<S: Storage>(storage: &mut S) -> Singleton<S, StakeConfig> {
+    singleton(storage, STAKE_CONFIG_KEY)
+}
+
+pub fn stake_config_r<S: Storage>(storage: &S) -> ReadonlySingleton<S, StakeConfig> {
+    singleton_read(storage, STAKE_CONFIG_KEY)
+}
+
+pub fn total_staked_w<S: Storage>(storage: &mut S) -> Singleton<S, Uint128> {
+    singleton(storage, TOTAL_STAKED_KEY)
+}
+
+pub fn total_staked_r<S: Storage>(storage: &S) -> ReadonlySingleton<S, Uint128> {
+    singleton_read(storage, TOTAL_STAKED_KEY)
+}
+
+pub fn user_staked_r<S: Storage>(storage: &S) -> ReadonlyBucket<S, Uint128> {
+    bucket_read(USER_STAKED_KEY, storage)
+}
+
+pub fn user_staked_w<S: Storage>(storage: &mut S) -> Bucket<S, Uint128> {
+    bucket(USER_STAKED_KEY, storage)
+}
+
+// Distributors
+pub fn distributors_w<S: Storage>(storage: &mut S) -> Singleton<S, Vec<HumanAddr>> {
+    singleton(storage, DISTRIBUTORS_KEY)
+}
+
+pub fn distributors_r<S: Storage>(storage: &S) -> ReadonlySingleton<S, Vec<HumanAddr>> {
+    singleton_read(storage, DISTRIBUTORS_KEY)
+}
+
+pub fn distributors_enabled<S: Storage>(storage: &S) -> StdResult<bool> {
+    distributors_transfer_r(storage).load()
+}
+
+pub fn distributors_transfer_w<S: Storage>(storage: &mut S) -> Singleton<S, bool> {
+    singleton(storage, DISTRIBUTORS_TRANSFER_KEY)
+}
+
+pub fn distributors_transfer_r<S: Storage>(storage: &S) -> ReadonlySingleton<S, bool> {
+    singleton_read(storage, DISTRIBUTORS_TRANSFER_KEY)
+}
+
 // Config
 
 #[derive(Serialize, Debug, Deserialize, Clone, PartialEq, JsonSchema)]
@@ -39,10 +96,6 @@ pub struct Constants {
     pub prng_seed: Vec<u8>,
     // privacy configuration
     pub total_supply_is_public: bool,
-    // is deposit enabled
-    pub deposit_is_enabled: bool,
-    // is redeem enabled
-    pub redeem_is_enabled: bool,
     // is mint enabled
     pub mint_is_enabled: bool,
     // is burn enabled

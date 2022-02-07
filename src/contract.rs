@@ -14,15 +14,14 @@ use crate::msg::{
 };
 use crate::rand::sha_256;
 use crate::receiver::Snip20ReceiveMsg;
-use crate::state::{
-    get_receiver_hash, read_allowance, read_viewing_key, set_receiver_hash, write_allowance,
-    write_viewing_key, Balances, Config, Constants, ReadonlyBalances, ReadonlyConfig,
-};
+use crate::state::{get_receiver_hash, read_allowance, read_viewing_key, set_receiver_hash, write_allowance, write_viewing_key, Balances, Config, Constants, ReadonlyBalances, ReadonlyConfig, stake_config_w, total_staked_w, distributors_transfer_w, distributors_w};
 use crate::transaction_history::{
     get_transfers, get_txs, store_burn, store_deposit, store_mint, store_redeem, store_transfer,
 };
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
+use secret_toolkit::snip20::register_receive_msg;
+use shade_protocol::shd_staking::stake::StakeConfig;
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -89,8 +88,6 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         admin: admin.clone(),
         prng_seed: prng_seed_hashed.to_vec(),
         total_supply_is_public: init_config.public_total_supply(),
-        deposit_is_enabled: init_config.deposit_enabled(),
-        redeem_is_enabled: init_config.redeem_enabled(),
         mint_is_enabled: init_config.mint_enabled(),
         burn_is_enabled: init_config.burn_enabled(),
         contract_address: env.contract.address,
@@ -104,7 +101,37 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     };
     config.set_minters(minters)?;
 
-    Ok(InitResponse::default())
+    // Set distributors
+    distributors_transfer_w(&mut deps.storage).save(&msg.limit_transfer)?;
+    distributors_w(&mut deps.storage).save(&msg.distributors.unwrap_or(vec![]))?;
+
+    // Set stake config
+    stake_config_w(&mut deps.storage).save(&StakeConfig{
+        unbond_time: msg.unbond_time,
+        staked_token: msg.staked_token,
+        treasury: None
+    })?;
+
+    // Set staked state to 0
+    total_staked_w(&mut deps.storage).save(&Uint128::zero())?;
+
+    // Register receive if necessary
+    let mut messages = vec![];
+    if let Some(addr) = msg.treasury {
+        if let Some(code_hash) = msg.treasury_code_hash {
+            messages.push(register_receive_msg(
+                env.contract_code_hash,
+                None,
+                256,
+                code_hash,
+                addr)?);
+        }
+    }
+
+    Ok(InitResponse{
+        messages,
+        log: vec![]
+    })
 }
 
 fn pad_response(response: StdResult<HandleResponse>) -> StdResult<HandleResponse> {
@@ -143,9 +170,54 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
     }
 
     let response = match msg {
-        // Native
-        HandleMsg::Deposit { .. } => try_deposit(deps, env),
-        HandleMsg::Redeem { amount, .. } => try_redeem(deps, env, amount),
+        // Staking
+        HandleMsg::UpdateStakeConfig {
+            unbond_time,
+            staked_token,
+            disable_treasury,
+            treasury,
+            treasury_code_hash,
+            ..
+        } => try_update_stake_config(deps, env, unbond_time, staked_token, disable_treasury, treasury, treasury_code_hash),
+        HandleMsg::Receive {
+            sender,
+            from,
+            amount,
+            msg,
+            ..
+        } => try_receive(deps, env, sender, from, amount, msg),
+        HandleMsg::Unbond {
+            amount,
+            ..
+        } => try_unbond(deps, env, amount),
+        HandleMsg::ClaimUnbond {
+            ..
+        } => try_claim_unbond(deps, env),
+        HandleMsg::ClaimRewards {
+            ..
+        } => try_claim_rewards(deps, env),
+        HandleMsg::StakeRewards {
+            ..
+        } => try_stake_rewards(deps, env),
+
+        // Balance
+        HandleMsg::ExposeBalance {
+            recipient,
+            code_hash,
+            msg,
+            memo,
+            ..
+        } => try_expose_balance(deps, env, recipient, code_hash, msg, memo),
+
+        // Distributors
+        HandleMsg::AddDistributors {
+            distributors,
+            ..
+        } => try_add_distributors(deps, env, distributors),
+        HandleMsg::SetDistributors {
+            distributors,
+            ..
+        } => try_set_distributors(deps, env, distributors),
 
         // Base
         HandleMsg::Transfer {
@@ -709,147 +781,6 @@ pub fn query_allowance<S: Storage, A: Api, Q: Querier>(
         expiration: allowance.expiration,
     };
     to_binary(&response)
-}
-
-fn try_deposit<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: Env,
-) -> StdResult<HandleResponse> {
-    let mut amount = Uint128::zero();
-
-    for coin in &env.message.sent_funds {
-        if coin.denom == "uscrt" {
-            amount = coin.amount
-        } else {
-            return Err(StdError::generic_err(
-                "Tried to deposit an unsupported token",
-            ));
-        }
-    }
-
-    if amount.is_zero() {
-        return Err(StdError::generic_err("No funds were sent to be deposited"));
-    }
-
-    let raw_amount = amount.u128();
-
-    let mut config = Config::from_storage(&mut deps.storage);
-    let constants = config.constants()?;
-    if !constants.deposit_is_enabled {
-        return Err(StdError::generic_err(
-            "Deposit functionality is not enabled for this token.",
-        ));
-    }
-    let total_supply = config.total_supply();
-    if let Some(total_supply) = total_supply.checked_add(raw_amount) {
-        config.set_total_supply(total_supply);
-    } else {
-        return Err(StdError::generic_err(
-            "This deposit would overflow the currency's total supply",
-        ));
-    }
-
-    let sender_address = deps.api.canonical_address(&env.message.sender)?;
-
-    let mut balances = Balances::from_storage(&mut deps.storage);
-    let account_balance = balances.balance(&sender_address);
-    if let Some(account_balance) = account_balance.checked_add(raw_amount) {
-        balances.set_account_balance(&sender_address, account_balance);
-    } else {
-        return Err(StdError::generic_err(
-            "This deposit would overflow your balance",
-        ));
-    }
-
-    store_deposit(
-        &mut deps.storage,
-        &sender_address,
-        amount,
-        "uscrt".to_string(),
-        &env.block,
-    )?;
-
-    let res = HandleResponse {
-        messages: vec![],
-        log: vec![],
-        data: Some(to_binary(&HandleAnswer::Deposit { status: Success })?),
-    };
-
-    Ok(res)
-}
-
-fn try_redeem<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: Env,
-    amount: Uint128,
-) -> StdResult<HandleResponse> {
-    let config = ReadonlyConfig::from_storage(&deps.storage);
-    let constants = config.constants()?;
-    if !constants.redeem_is_enabled {
-        return Err(StdError::generic_err(
-            "Redeem functionality is not enabled for this token.",
-        ));
-    }
-
-    let sender_address = deps.api.canonical_address(&env.message.sender)?;
-    let amount_raw = amount.u128();
-
-    let mut balances = Balances::from_storage(&mut deps.storage);
-    let account_balance = balances.balance(&sender_address);
-
-    if let Some(account_balance) = account_balance.checked_sub(amount_raw) {
-        balances.set_account_balance(&sender_address, account_balance);
-    } else {
-        return Err(StdError::generic_err(format!(
-            "insufficient funds to redeem: balance={}, required={}",
-            account_balance, amount_raw
-        )));
-    }
-
-    let mut config = Config::from_storage(&mut deps.storage);
-    let total_supply = config.total_supply();
-    if let Some(total_supply) = total_supply.checked_sub(amount_raw) {
-        config.set_total_supply(total_supply);
-    } else {
-        return Err(StdError::generic_err(
-            "You are trying to redeem more tokens than what is available in the total supply",
-        ));
-    }
-
-    let token_reserve = deps
-        .querier
-        .query_balance(&env.contract.address, "uscrt")?
-        .amount;
-    if amount > token_reserve {
-        return Err(StdError::generic_err(
-            "You are trying to redeem for more SCRT than the token has in its deposit reserve.",
-        ));
-    }
-
-    let withdrawal_coins: Vec<Coin> = vec![Coin {
-        denom: "uscrt".to_string(),
-        amount,
-    }];
-
-    store_redeem(
-        &mut deps.storage,
-        &sender_address,
-        amount,
-        constants.symbol,
-        &env.block,
-    )?;
-
-    let res = HandleResponse {
-        messages: vec![CosmosMsg::Bank(BankMsg::Send {
-            from_address: env.contract.address,
-            to_address: env.message.sender,
-            amount: withdrawal_coins,
-        })],
-        log: vec![],
-        data: Some(to_binary(&HandleAnswer::Redeem { status: Success })?),
-    };
-
-    Ok(res)
 }
 
 fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
