@@ -10,6 +10,7 @@ use cosmwasm_std::{Binary, HumanAddr, StdError, StdResult, Uint128};
 use secret_toolkit::permit::Permit;
 use shade_protocol::asset::Contract;
 use shade_protocol::shd_staking::stake::StakeConfig;
+use shade_protocol::utils::asset::Contract;
 use crate::staking::StakeConfig;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
