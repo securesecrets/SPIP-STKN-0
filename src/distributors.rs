@@ -1,12 +1,20 @@
 use cosmwasm_std::{Api, Env, Extern, HandleResponse, HumanAddr, Querier, StdResult, Storage, to_binary};
-use shade_protocol::shd_staking::stake::Distributors;
+use shade_protocol::shd_staking::stake::{Distributors, DistributorsEnabled};
 use shade_protocol::storage::SingletonStorage;
 use crate::contract::check_if_admin;
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
 use crate::state::Config;
 
-// TODO: add distribuutor check to all of the send txs
+pub fn get_distributor<S: Storage, A: Api, Q: Querier>(
+    deps: &Extern<S, A, Q>,
+) -> StdResult<Option<Vec<HumanAddr>>>{
+    Ok(match DistributorsEnabled::load(&deps.storage)?.0 {
+        true => Some(Distributors::load(&deps.storage)?.0),
+        false => None
+    })
+}
+
 
 pub fn try_add_distributors<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,

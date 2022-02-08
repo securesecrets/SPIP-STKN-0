@@ -23,7 +23,7 @@ use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
 use secret_toolkit::snip20::register_receive_msg;
 use shade_protocol::shd_staking::stake::{Distributors, DistributorsEnabled, StakeConfig, TotalStaked};
 use shade_protocol::storage::SingletonStorage;
-use crate::distributors::{try_add_distributors, try_set_distributors};
+use crate::distributors::{get_distributor, try_add_distributors, try_set_distributors};
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -787,21 +787,32 @@ pub fn query_allowance<S: Storage, A: Api, Q: Querier>(
 
 fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
-    sender: &CanonicalAddr,
-    recipient: &CanonicalAddr,
+    sender: &HumanAddr,
+    sender_canon: &CanonicalAddr,
+    recipient: &HumanAddr,
+    recipient_canon: &CanonicalAddr,
     amount: Uint128,
     memo: Option<String>,
     block: &cosmwasm_std::BlockInfo,
+
+    distributors: &Option<Vec<HumanAddr>>
 ) -> StdResult<()> {
-    perform_transfer(&mut deps.storage, &sender, &recipient, amount.u128())?;
+    // Verify that this transfer is allowed
+    if let Some(distributors) = distributors {
+        if !distributors.contains(sender) && !distributors.contains(recipient) {
+            return Err(StdError::unauthorized())
+        }
+    }
+
+    perform_transfer(&mut deps.storage, &sender_canon, &recipient_canon, amount.u128())?;
 
     let symbol = Config::from_storage(&mut deps.storage).constants()?.symbol;
 
     store_transfer(
         &mut deps.storage,
-        &sender,
-        &sender,
-        &recipient,
+        &sender_canon,
+        &sender_canon,
+        &recipient_canon,
         amount,
         symbol,
         memo,
@@ -818,9 +829,23 @@ fn try_transfer<S: Storage, A: Api, Q: Querier>(
     amount: Uint128,
     memo: Option<String>,
 ) -> StdResult<HandleResponse> {
-    let sender = deps.api.canonical_address(&env.message.sender)?;
-    let recipient = deps.api.canonical_address(&recipient)?;
-    try_transfer_impl(deps, &sender, &recipient, amount, memo, &env.block)?;
+    let sender = env.message.sender;
+    let sender_canon = deps.api.canonical_address(&sender)?;
+    let recipient_canon = deps.api.canonical_address(&recipient)?;
+
+    let distributor = get_distributor(&deps.storage)?;
+
+    try_transfer_impl(
+        deps,
+        &sender,
+        &sender_canon,
+        &recipient,
+        &recipient_canon,
+        amount,
+        memo,
+        &env.block,
+        &distributor
+    )?;
 
     let res = HandleResponse {
         messages: vec![],
@@ -835,16 +860,24 @@ fn try_batch_transfer<S: Storage, A: Api, Q: Querier>(
     env: Env,
     actions: Vec<batch::TransferAction>,
 ) -> StdResult<HandleResponse> {
-    let sender = deps.api.canonical_address(&env.message.sender)?;
+    let sender = env.message.sender;
+    let sender_canon = deps.api.canonical_address(&sender)?;
+
+    let distributor = get_distributor(&deps.storage)?;
+
     for action in actions {
-        let recipient = deps.api.canonical_address(&action.recipient)?;
+        let recipient = action.recipient;
+        let recipient_canon = deps.api.canonical_address(&recipient)?;
         try_transfer_impl(
             deps,
             &sender,
+            &sender_canon,
             &recipient,
+            &recipient_canon,
             action.amount,
             action.memo,
             &env.block,
+            &distributor
         )?;
     }
 
@@ -899,15 +932,20 @@ fn try_send_impl<S: Storage, A: Api, Q: Querier>(
     memo: Option<String>,
     msg: Option<Binary>,
     block: &cosmwasm_std::BlockInfo,
+
+    distributors: &Option<Vec<HumanAddr>>
 ) -> StdResult<()> {
     let recipient_canon = deps.api.canonical_address(&recipient)?;
     try_transfer_impl(
         deps,
+        &sender,
         &sender_canon,
+        &recipient,
         &recipient_canon,
         amount,
         memo.clone(),
         block,
+        distributors
     )?;
 
     try_add_receiver_api_callback(
@@ -937,6 +975,9 @@ fn try_send<S: Storage, A: Api, Q: Querier>(
     let mut messages = vec![];
     let sender = env.message.sender;
     let sender_canon = deps.api.canonical_address(&sender)?;
+
+    let distributor = get_distributor(&deps.storage)?;
+
     try_send_impl(
         deps,
         &mut messages,
@@ -948,6 +989,7 @@ fn try_send<S: Storage, A: Api, Q: Querier>(
         memo,
         msg,
         &env.block,
+        &distributor
     )?;
 
     let res = HandleResponse {
@@ -966,6 +1008,9 @@ fn try_batch_send<S: Storage, A: Api, Q: Querier>(
     let mut messages = vec![];
     let sender = env.message.sender;
     let sender_canon = deps.api.canonical_address(&sender)?;
+
+    let distributor = get_distributor(&deps.storage)?;
+
     for action in actions {
         try_send_impl(
             deps,
@@ -978,6 +1023,7 @@ fn try_batch_send<S: Storage, A: Api, Q: Querier>(
             action.memo,
             action.msg,
             &env.block,
+            &distributor
         )?;
     }
 
@@ -1038,25 +1084,40 @@ fn use_allowance<S: Storage>(
 fn try_transfer_from_impl<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: &Env,
-    spender: &CanonicalAddr,
-    owner: &CanonicalAddr,
-    recipient: &CanonicalAddr,
+    spender: &HumanAddr,
+    spender_canon: &CanonicalAddr,
+    owner: &HumanAddr,
+    owner_canon: &CanonicalAddr,
+    recipient: &HumanAddr,
+    recipient_canon: &CanonicalAddr,
     amount: Uint128,
     memo: Option<String>,
+
+    distributors: &Option<Vec<HumanAddr>>
 ) -> StdResult<()> {
+
+    // Verify that this transfer is allowed
+    if let Some(distributors) = distributors {
+        if !distributors.contains(spender) &&
+            !distributors.contains(owner) &&
+            !distributors.contains(recipient){
+            return Err(StdError::unauthorized())
+        }
+    }
+
     let raw_amount = amount.u128();
 
-    use_allowance(&mut deps.storage, env, owner, spender, raw_amount)?;
+    use_allowance(&mut deps.storage, env, owner_canon, spender_canon, raw_amount)?;
 
-    perform_transfer(&mut deps.storage, owner, recipient, raw_amount)?;
+    perform_transfer(&mut deps.storage, owner_canon, recipient_canon, raw_amount)?;
 
     let symbol = Config::from_storage(&mut deps.storage).constants()?.symbol;
 
     store_transfer(
         &mut deps.storage,
-        owner,
-        spender,
-        recipient,
+        owner_canon,
+        spender_canon,
+        recipient_canon,
         amount,
         symbol,
         memo,
@@ -1074,10 +1135,23 @@ fn try_transfer_from<S: Storage, A: Api, Q: Querier>(
     amount: Uint128,
     memo: Option<String>,
 ) -> StdResult<HandleResponse> {
-    let spender = deps.api.canonical_address(&env.message.sender)?;
-    let owner = deps.api.canonical_address(owner)?;
-    let recipient = deps.api.canonical_address(recipient)?;
-    try_transfer_from_impl(deps, env, &spender, &owner, &recipient, amount, memo)?;
+    let spender = &env.message.sender;
+    let spender_canon = deps.api.canonical_address(&sender)?;
+    let owner_canon = deps.api.canonical_address(owner)?;
+    let recipient_canon = deps.api.canonical_address(recipient)?;
+    try_transfer_from_impl(
+        deps,
+        env,
+        &spender,
+        &spender_canon,
+        &owner,
+        &owner_canon,
+        &recipient,
+        &recipient_canon,
+        amount,
+        memo,
+        &get_distributor(&deps.storage)?
+    )?;
 
     let res = HandleResponse {
         messages: vec![],
@@ -1092,18 +1166,26 @@ fn try_batch_transfer_from<S: Storage, A: Api, Q: Querier>(
     env: &Env,
     actions: Vec<batch::TransferFromAction>,
 ) -> StdResult<HandleResponse> {
-    let spender = deps.api.canonical_address(&env.message.sender)?;
+    let spender = &env.message.sender;
+    let spender_canon = deps.api.canonical_address(&spender)?;
+
+    let distributor = get_distributor(&deps.storage)?;
+
     for action in actions {
-        let owner = deps.api.canonical_address(&action.owner)?;
-        let recipient = deps.api.canonical_address(&action.recipient)?;
+        let owner_canon = deps.api.canonical_address(&action.owner)?;
+        let recipient_canon = deps.api.canonical_address(&action.recipient)?;
         try_transfer_from_impl(
             deps,
             env,
-            &spender,
-            &owner,
-            &recipient,
+            spender,
+            &spender_canon,
+            &action.owner,
+            &owner_canon,
+            &action.recipient,
+            &recipient_canon,
             action.amount,
             action.memo,
+            &distributor
         )?;
     }
 
@@ -1122,6 +1204,7 @@ fn try_send_from_impl<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     messages: &mut Vec<CosmosMsg>,
+    spender: &HumanAddr,
     spender_canon: &CanonicalAddr, // redundant but more efficient
     owner: HumanAddr,
     recipient: HumanAddr,
@@ -1129,17 +1212,23 @@ fn try_send_from_impl<S: Storage, A: Api, Q: Querier>(
     amount: Uint128,
     memo: Option<String>,
     msg: Option<Binary>,
+
+    distributors: &Option<Vec<HumanAddr>>
 ) -> StdResult<()> {
     let owner_canon = deps.api.canonical_address(&owner)?;
     let recipient_canon = deps.api.canonical_address(&recipient)?;
     try_transfer_from_impl(
         deps,
         &env,
+        &spender,
         &spender_canon,
+        &owner,
         &owner_canon,
+        &recipient,
         &recipient_canon,
         amount,
         memo.clone(),
+        &get_distributor(&deps.storage)?
     )?;
 
     try_add_receiver_api_callback(
@@ -1175,6 +1264,7 @@ fn try_send_from<S: Storage, A: Api, Q: Querier>(
         deps,
         env,
         &mut messages,
+        &spender,
         &spender_canon,
         owner,
         recipient,
@@ -1182,6 +1272,7 @@ fn try_send_from<S: Storage, A: Api, Q: Querier>(
         amount,
         memo,
         msg,
+        &get_distributor(&deps.storage)?
     )?;
 
     let res = HandleResponse {
@@ -1201,11 +1292,14 @@ fn try_batch_send_from<S: Storage, A: Api, Q: Querier>(
     let spender_canon = deps.api.canonical_address(spender)?;
     let mut messages = vec![];
 
+    let distributor = get_distributor(&deps.storage)?;
+
     for action in actions {
         try_send_from_impl(
             deps,
             env.clone(),
             &mut messages,
+            spender,
             &spender_canon,
             action.owner,
             action.recipient,
@@ -1213,6 +1307,7 @@ fn try_batch_send_from<S: Storage, A: Api, Q: Querier>(
             action.amount,
             action.memo,
             action.msg,
+            &distributor
         )?;
     }
 
