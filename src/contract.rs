@@ -20,10 +20,12 @@ use crate::transaction_history::{
 };
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
-use secret_toolkit::snip20::register_receive_msg;
-use shade_protocol::shd_staking::stake::{Distributors, DistributorsEnabled, StakeConfig, TotalStaked};
+use secret_toolkit::snip20::{register_receive_msg, token_info_query};
+use shade_protocol::shd_staking::stake::{Distributors, DistributorsEnabled, StakeConfig, TotalShares, TotalTokens, UnsentStakedTokens};
 use shade_protocol::storage::SingletonStorage;
 use crate::distributors::{get_distributor, try_add_distributors, try_set_distributors};
+use crate::expose_balance::try_expose_balance;
+use crate::stake::{try_claim_rewards, try_claim_unbond, try_receive, try_stake_rewards, try_unbond, try_update_stake_config};
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -45,14 +47,12 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
             "Ticker symbol is not in expected format [A-Z]{3,6}",
         ));
     }
-    if msg.decimals > 18 {
-        return Err(StdError::generic_err("Decimals must not exceed 18"));
-    }
 
     let init_config = msg.config();
     let admin = msg.admin.unwrap_or(env.message.sender);
     let canon_admin = deps.api.canonical_address(&admin)?;
 
+    // TODO: remove initial supply
     let mut total_supply: u128 = 0;
     {
         let initial_balances = msg.initial_balances.unwrap_or_default();
@@ -82,11 +82,19 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 
     let prng_seed_hashed = sha_256(&msg.prng_seed.0);
 
+    // Set stake config
+    let staked_token_decimals = token_info_query(
+        &deps.querier,
+        256,
+        msg.staked_token.code_hash,
+        msg.staked_token.address
+    )?.decimals;
+
     let mut config = Config::from_storage(&mut deps.storage);
     config.set_constants(&Constants {
         name: msg.name,
         symbol: msg.symbol,
-        decimals: msg.decimals,
+        decimals: staked_token_decimals,
         admin: admin.clone(),
         prng_seed: prng_seed_hashed.to_vec(),
         total_supply_is_public: init_config.public_total_supply(),
@@ -107,15 +115,25 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     Distributors(msg.distributors.unwrap_or(vec![])).save(&mut deps.storage)?;
     DistributorsEnabled(msg.limit_transfer).save(&mut deps.storage)?;
 
-    // Set stake config
+    if staked_token_decimals * 2 > msg.share_decimals {
+        return Err(StdError::generic_err(
+            "Share decimals must be two times greater than the token decimals"))
+    }
+
     StakeConfig{
         unbond_time: msg.unbond_time,
-        staked_token: msg.staked_token,
-        treasury: None
+        staked_token: msg.staked_token.clone(),
+        decimal_difference: msg.share_decimals - staked_token_decimals,
+        treasury: msg.treasury.clone()
     }.save(&mut deps.storage)?;
 
-    // Set staked state to 0
-    TotalStaked(0).save(&mut deps.storage)?;
+    // Set shares state to 0
+    TotalShares(0).save(&mut deps.storage)?;
+
+    // Set tokens
+    TotalTokens(0).save(&mut deps.storage)?;
+
+    UnsentStakedTokens(0).save(&mut deps.storage)?;
 
     // Register receive if necessary
     let mut messages = vec![];
@@ -175,12 +193,10 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
         // Staking
         HandleMsg::UpdateStakeConfig {
             unbond_time,
-            staked_token,
             disable_treasury,
             treasury,
-            treasury_code_hash,
             ..
-        } => try_update_stake_config(deps, env, unbond_time, staked_token, disable_treasury, treasury, treasury_code_hash),
+        } => try_update_stake_config(deps, env, unbond_time, disable_treasury, treasury),
         HandleMsg::Receive {
             sender,
             from,
@@ -565,7 +581,7 @@ fn change_admin<S: Storage, A: Api, Q: Querier>(
     })
 }
 
-fn try_mint_impl<S: Storage>(
+pub fn try_mint_impl<S: Storage>(
     storage: &mut S,
     minter: &CanonicalAddr,
     recipient: &CanonicalAddr,
@@ -1228,7 +1244,7 @@ fn try_send_from_impl<S: Storage, A: Api, Q: Querier>(
         &recipient_canon,
         amount,
         memo.clone(),
-        &get_distributor(&deps.storage)?
+        &distributors
     )?;
 
     try_add_receiver_api_callback(

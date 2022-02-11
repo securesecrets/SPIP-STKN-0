@@ -10,6 +10,7 @@ mod viewing_key;
 mod stake;
 mod expose_balance;
 mod distributors;
+mod state_staking;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {

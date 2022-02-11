@@ -1,19 +1,40 @@
-use cosmwasm_std::{Api, Binary, CosmosMsg, Env, Extern, HandleResponse, HumanAddr, Querier, StdResult, Storage, to_binary, Uint128};
+use cosmwasm_std::{Api, Binary, CosmosMsg, Env, Extern, HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, to_binary, Uint128};
 use secret_toolkit::utils::HandleCallback;
 use crate::contract::check_if_admin;
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
-use crate::state::Config;
+use crate::state::{Balances, Config, get_receiver_hash};
 
 pub fn try_expose_balance<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
-
+    recipient: HumanAddr,
+    code_hash: String,
+    msg: Option<Binary>,
+    memo: Option<String>
 ) -> StdResult<HandleResponse> {
 
+    // Get balance to expose
+    let balance = Balances::from_storage(&mut deps.storage)
+        .balance(&deps.api.canonical_address(&env.message.sender)?);
 
+    let receiver_hash: String;
+    if let Some(code_hash) = code_hash {
+        receiver_hash = code_hash;
+    }
+    else if let Some(code_hash) = get_receiver_hash(&deps.storage, &recipient) {
+        receiver_hash = code_hash?;
+    }
+    else {
+        return Err(StdError::generic_err("No code hash received"))
+    }
 
-    let message = vec![];
+    let messages = vec![Snip20BalanceReceiverMsg::new(
+        env.message.sender,
+        balance,
+        memo,
+        msg
+    ).to_cosmos_msg(receiver_hash, recipient)?];
 
     Ok(HandleResponse {
         messages,

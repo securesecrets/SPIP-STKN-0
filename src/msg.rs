@@ -24,7 +24,7 @@ pub struct InitMsg {
     pub name: String,
     pub admin: Option<HumanAddr>,
     pub symbol: String,
-    pub decimals: u8,
+    pub share_decimals: u8,
     pub initial_balances: Option<Vec<InitialBalance>>,
     pub prng_seed: Binary,
     pub config: Option<InitConfig>,
@@ -83,17 +83,16 @@ pub enum HandleMsg {
     // Staking
     UpdateStakeConfig {
         unbond_time: Option<u64>,
-        staked_token: Option<Contract>,
         disable_treasury: bool,
         treasury: Option<HumanAddr>,
-        treasury_code_hash: Option<String>,
         padding: String
     },
     Receive {
         sender: HumanAddr,
         from: HumanAddr,
         amount: Uint128,
-        msg: Option<String>,
+        msg: Option<Binary>,
+        memo: Option<String>,
         padding: String
     },
     Unbond {
@@ -365,6 +364,8 @@ pub enum QueryMsg {
     // Staking
     StakeConfig {},
     TotalStaked {},
+    // Total token shares per token
+    StakeRate {},
     Unbonding {
         start: u64,
         end: u64
