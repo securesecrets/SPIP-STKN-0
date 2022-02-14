@@ -21,7 +21,8 @@ use crate::transaction_history::{
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
 use secret_toolkit::snip20::{register_receive_msg, token_info_query};
-use shade_protocol::shd_staking::stake::{Distributors, DistributorsEnabled, StakeConfig, TotalShares, TotalTokens, UnsentStakedTokens};
+use shade_protocol::shd_staking::stake::{StakeConfig};
+use crate::state_staking::{Distributors, DistributorsEnabled, TotalShares, TotalTokens, UnsentStakedTokens};
 use shade_protocol::storage::SingletonStorage;
 use crate::distributors::{get_distributor, try_add_distributors, try_set_distributors};
 use crate::expose_balance::try_expose_balance;
@@ -82,6 +83,8 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 
     let prng_seed_hashed = sha_256(&msg.prng_seed.0);
 
+    // TODO: make decimals an optional for specific cases (such as testing)
+
     // Set stake config
     let staked_token_decimals = token_info_query(
         &deps.querier,
@@ -123,7 +126,6 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     StakeConfig{
         unbond_time: msg.unbond_time,
         staked_token: msg.staked_token.clone(),
-        decimal_difference: msg.share_decimals - staked_token_decimals,
         treasury: msg.treasury.clone()
     }.save(&mut deps.storage)?;
 
@@ -153,6 +155,8 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         log: vec![]
     })
 }
+
+// TODO: if user can send tokens, force claiming and reduce shares to avoid issues
 
 fn pad_response(response: StdResult<HandleResponse>) -> StdResult<HandleResponse> {
     response.map(|mut response| {
@@ -202,8 +206,9 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
             from,
             amount,
             msg,
+            memo,
             ..
-        } => try_receive(deps, env, sender, from, amount, msg),
+        } => try_receive(deps, env, sender, from, amount, msg, memo),
         HandleMsg::Unbond {
             amount,
             ..

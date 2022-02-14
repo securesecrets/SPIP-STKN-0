@@ -11,6 +11,7 @@ mod stake;
 mod expose_balance;
 mod distributors;
 mod state_staking;
+mod stake_queries;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {

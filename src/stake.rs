@@ -10,7 +10,7 @@ use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
 use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, UnbondingQueue, UnsentStakedTokens, UserShares};
 use crate::state::{Balances, Config, Constants};
-use crate::transaction_history::{store_add_reward, store_stake, store_unbond};
+use crate::transaction_history::{store_add_reward, store_claim_reward, store_claim_unbond, store_stake, store_unbond};
 
 pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -126,6 +126,42 @@ fn add_balance<S: Storage>(
 }
 
 ///
+/// Removed items from internal supply
+///
+fn subtract_internal_supply(
+    storage: &mut S,
+    config: &mut Config<S>,
+    total_shares: &mut TotalShares,
+    shares: u128,
+    total_tokens: &mut TotalTokens,
+    tokens: u128,
+) -> StdResult<()> {
+    // Update total shares
+    if let Some(total) = total_shares.0.checked_sub(shares) {
+        TotalShares(total).save(&mut deps.storage)?;
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+
+    // Update total staked
+    if let Some(total) = total_tokens.0.checked_sub(tokens) {
+        TotalTokens(total).save(&mut deps.storage)?;
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+    if let Some(total) = config.total_supply().checked_sub(tokens) {
+        config.set_total_supply(total);
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+
+    Ok(())
+}
+
+///
 /// Updates total states to reflect balance changes
 ///
 fn remove_balance<S: Storage>(
@@ -162,27 +198,14 @@ fn remove_balance<S: Storage>(
         return Err(StdError::generic_err("Insufficient shares"))
     }
 
-    // Update total shares
-    if let Some(total) = total_shares.0.checked_sub(shares) {
-        TotalShares(total).save(&mut deps.storage)?;
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
-    }
-
-    // Update total staked
-    if let Some(total) = total_tokens.0.checked_sub(amount.u128()) {
-        TotalTokens(total).save(&mut deps.storage)?;
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
-    }
-    if let Some(total) = config.total_supply().checked_sub(amount) {
-        config.set_total_supply(total);
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
-    }
+    subtract_internal_supply(
+        storage,
+        config,
+        &mut total_shares,
+        shares,
+        &mut total_tokens,
+        amount
+    )?;
 
     let mut balances = Balances::from_storage(storage);
     let mut account_balance = balances.balance(sender_canon);
@@ -195,6 +218,46 @@ fn remove_balance<S: Storage>(
     }
     balances.set_account_balance(sender_canon, account_balance);
     Ok(())
+}
+
+fn claim_rewards(
+    storage: &mut S,
+    config: &mut Config<S>,
+    stake_config: &StakeConfig,
+    sender: &HumanAddr,
+    sender_canon: &CanonicalAddr,
+) -> StdResult<u128> {
+    let mut user_shares = UserShares::may_load(
+        &deps.storage,
+        sender.as_str().as_bytes()
+    )?.expect("No funds");
+
+    let user_balance = Balances::from_storage(storage).balance(sender_canon);
+
+    // Get total supplied tokens
+    let mut total_shares = TotalShares::load(&deps.storage)?;
+    let mut total_tokens = TotalTokens::load(&deps.storage)?;
+
+    let (reward_shares, reward_token) = calculate_rewards(
+        stake_config, user_balance, user_shares.0, total_tokens.0, total_shares.0);
+
+    if let Some(user_shares) = user_shares.0.checked_sub(reward_shares) {
+        UserShares(user_shares).save(&mut deps.storage, sender.as_str().as_bytes())?;
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+
+    subtract_internal_supply(
+        storage,
+        config,
+        &mut total_shares,
+        reward_shares,
+        &mut total_tokens,
+        reward_token
+    )?;
+
+    Ok(reward_token)
 }
 
 pub fn shares_per_token<S: Storage>(
@@ -232,7 +295,7 @@ pub fn tokens_per_share<S: Storage>(
 ///
 /// Returns rewards in tokens, and shares
 ///
-pub fn get_rewards(
+pub fn calculate_rewards(
     config: &StakeConfig,
     tokens: u128,
     shares: u128,
@@ -411,7 +474,10 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
     env: Env,
 ) -> StdResult<HandleResponse> {
     let sender = &env.message.sender;
+    let sender_canon = &deps.api.canonical_address(sender)?;
+
     let stake_config = StakeConfig::load(&deps.storage)?;
+    let config = Config::from_storage(&mut deps.storage);
 
     let daily_unbond_queue = DailyUnbondingQueue::load(
         &deps.storage)?.0;
@@ -431,6 +497,15 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
     }
 
     unbond_queue.save(&mut deps.storage, sender.as_str().as_bytes())?;
+
+    store_claim_unbond(
+        &mut deps.storage,
+        sender_canon,
+        total,
+        config.constants()?.symbol,
+        None,
+        &env.block
+    )?;
 
     let messages= vec![send_msg(
         sender.clone(),
@@ -454,6 +529,37 @@ pub fn try_claim_rewards<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
 ) -> StdResult<HandleResponse> {
+
+    let mut config = Config::from_storage(&mut deps.storage);
+    let stake_config = StakeConfig::load(&deps.storage)?;
+
+    let sender = &env.message.sender;
+    let sender_canon = &deps.api.canonical_address(sender)?;
+
+    let claim = claim_rewards(&mut deps.storage, &mut config, &stake_config, sender, sender_canon)?;
+
+    let messages = vec![
+        send_msg(
+            sender.clone(),
+            Uint128(claim),
+            None,
+            None,
+            None,
+            256,
+            stake_config.staked_token.code_hash,
+            stake_config.staked_token.address
+        )?
+    ];
+
+    store_claim_reward(
+        &mut deps.storage,
+        sender_canon,
+        Uint128(claim),
+        config.constants()?.symbol,
+        None,
+        &env.block
+    )?;
+
     Ok(HandleResponse {
         messages,
         log: vec![],
@@ -465,6 +571,67 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
 ) -> StdResult<HandleResponse> {
+
+    // Clam rewards
+    let mut config = Config::from_storage(&mut deps.storage);
+    let stake_config = StakeConfig::load(&deps.storage)?;
+
+    let sender = &env.message.sender;
+    let sender_canon = &deps.api.canonical_address(sender)?;
+
+    let claim = claim_rewards(&mut deps.storage, &mut config, &stake_config, sender, sender_canon)?;
+
+    store_claim_reward(
+        &mut deps.storage,
+        sender_canon,
+        Uint128(claim),
+        config.constants()?.symbol,
+        None,
+        &env.block
+    )?;
+
+    // Stake rewards
+    // Update user stake
+    add_balance(
+        &mut deps.storage,
+        &mut config,
+        &stake_config,
+        &sender,
+        &sender_canon,
+        amount.u128()
+    )?;
+
+    // Store data
+    store_stake(
+        &mut deps.storage,
+        &sender_canon,
+        Uint128(claim),
+        config.constants()?.symbol,
+        None,
+        &env.block
+    )?;
+
+    let mut messages= vec![];
+
+    // Send tokens
+    if let Some(treasury) = stake_config.treasury {
+        messages.push(send_msg(
+            treasury,
+            Uint128(claim),
+            None,
+            None,
+            None,
+            256,
+            stake_config.staked_token.code_hash,
+            stake_config.staked_token.address
+        )?);
+    }
+    else {
+        let mut stored_tokens = UnsentStakedTokens::load(&deps.storage)?;
+        stored_tokens.0 += amount.u128();
+        stored_tokens.save(&mut deps.storage)?;
+    }
+
     Ok(HandleResponse {
         messages,
         log: vec![],
@@ -482,10 +649,11 @@ mod tests {
         StakeConfig {
             unbond_time: 0,
             staked_token: Contract { address: Default::default(), code_hash: "".to_string() },
-            decimal_difference: shares_decimals - token_decimals,
             treasury: None
         }
     }
+
+    // TODO: test functions used by handlemsgs by simulating storages
 
     #[test]
     fn tokens_per_share_test() {
