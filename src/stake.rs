@@ -2,14 +2,15 @@ use std::collections::BinaryHeap;
 use cosmwasm_std::{Api, Binary, CanonicalAddr, Env, Extern, from_binary, HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, to_binary, Uint128};
 use secret_toolkit::snip20::{register_receive_msg, send_msg};
 use shade_protocol::shd_staking::ReceiveType;
-use shade_protocol::shd_staking::stake::{StakeConfig, TotalShares, TotalTokens, UnbondingQueue, UnsentStakedTokens, UserShares};
+use shade_protocol::shd_staking::stake::{DailyUnbonding, StakeConfig, Unbonding};
 use shade_protocol::storage::{BucketStorage, SingletonStorage};
 use shade_protocol::utils::asset::Contract;
 use crate::contract::{check_if_admin, try_mint_impl};
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
+use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, UnbondingQueue, UnsentStakedTokens, UserShares};
 use crate::state::{Balances, Config, Constants};
-use crate::transaction_history::{store_add_reward, store_stake};
+use crate::transaction_history::{store_add_reward, store_stake, store_unbond};
 
 pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -59,13 +60,59 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
     })
 }
 
+///
+/// Rounds down a date to the nearest day
+///
+fn round_date(date: &u64) -> u64 {
+    let day = 86400; //60 * 60 * 24
+    date - (date % day)
+}
+
+///
+/// Updates total states to reflect balance changes
+///
 fn add_balance<S: Storage>(
     storage: &mut S,
-    account: &CanonicalAddr,
+    config: &mut Config<S>,
+    stake_config: &StakeConfig,
+    sender: &HumanAddr,
+    sender_canon: &CanonicalAddr,
     amount: u128
 ) -> StdResult<()> {
+    // Check if user account exists
+    let mut user_shares = UserShares::may_load(
+        &deps.storage,
+        sender.as_str().as_bytes()
+    )?.unwrap_or(UserShares(0));
+
+    // Get total supplied tokens
+    let mut total_shares = TotalShares::load(&deps.storage)?;
+    let mut total_tokens = TotalTokens::load(&deps.storage)?;
+
+    // Calculate shares per token supplied
+    let shares = shares_per_token(
+        &stake_config,
+        &amount,
+        &total_tokens.0,
+        &total_shares.0,
+    );
+
+    // Update user's shares
+    user_shares.0 += shares;
+    user_shares.save(&mut deps.storage, sender.as_str().as_bytes())?;
+
+    // Update total shares
+    total_shares.0 += shares;
+    total_shares.save(&mut deps.storage)?;
+
+    // Update total staked
+    config.set_total_supply(config.total_supply() + amount);
+    total_tokens.0 += amount;
+    total_tokens.save(&mut deps.storage)?;
+
+    // Update user staked / tokens
     let mut balances = Balances::from_storage(storage);
-    let mut account_balance = balances.balance(account);
+    let mut account_balance = balances.balance(sender_canon);
     if let Some(new_balance) = account_balance.checked_add(amount) {
         account_balance = new_balance;
     } else {
@@ -73,17 +120,72 @@ fn add_balance<S: Storage>(
             "This mint attempt would increase the account's balance above the supported maximum",
         ));
     }
-    balances.set_account_balance(account, account_balance);
+    balances.set_account_balance(sender_canon, account_balance);
+
     Ok(())
 }
 
+///
+/// Updates total states to reflect balance changes
+///
 fn remove_balance<S: Storage>(
     storage: &mut S,
-    account: &CanonicalAddr,
+    config: &mut Config<S>,
+    stake_config: &StakeConfig,
+    sender: &HumanAddr,
+    sender_canon: &CanonicalAddr,
     amount: u128
 ) -> StdResult<()> {
+    // Return insufficient funds
+    let mut user_shares = UserShares::may_load(
+        &deps.storage,
+        sender.as_str().as_bytes()
+    )?.expect("No funds");
+
+    // Get total supplied tokens
+    let mut total_shares = TotalShares::load(&deps.storage)?;
+    let mut total_tokens = TotalTokens::load(&deps.storage)?;
+
+    // Calculate shares per token supplied
+    let shares = shares_per_token(
+        &stake_config,
+        &amount.u128(),
+        &total_tokens.0,
+        &total_shares.0,
+    );
+
+    // Update user's shares
+    if let Some(user_shares) = user_shares.0.checked_sub(shares) {
+        UserShares(user_shares).save(&mut deps.storage, sender.as_str().as_bytes())?;
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+
+    // Update total shares
+    if let Some(total) = total_shares.0.checked_sub(shares) {
+        TotalShares(total).save(&mut deps.storage)?;
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+
+    // Update total staked
+    if let Some(total) = total_tokens.0.checked_sub(amount.u128()) {
+        TotalTokens(total).save(&mut deps.storage)?;
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+    if let Some(total) = config.total_supply().checked_sub(amount) {
+        config.set_total_supply(total);
+    }
+    else {
+        return Err(StdError::generic_err("Insufficient shares"))
+    }
+
     let mut balances = Balances::from_storage(storage);
-    let mut account_balance = balances.balance(account);
+    let mut account_balance = balances.balance(sender_canon);
     if let Some(new_balance) = account_balance.checked_sub(amount) {
         account_balance = new_balance;
     } else {
@@ -91,7 +193,7 @@ fn remove_balance<S: Storage>(
             "This burn attempt would decrease the account's balance to a negative",
         ));
     }
-    balances.set_account_balance(account, account_balance);
+    balances.set_account_balance(sender_canon, account_balance);
     Ok(())
 }
 
@@ -174,39 +276,15 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
     match receive_type {
         ReceiveType::Bond => {
 
-            // Check if user account exists
-            let mut user_shares = UserShares::may_load(
-                &deps.storage,
-                sender.as_str().as_bytes()
-            )?.unwrap_or(UserShares(0));
-
-            // Get total supplied tokens
-            let mut total_shares = TotalShares::load(&deps.storage)?;
-            let mut total_tokens = TotalTokens::load(&deps.storage)?;
-
-            // Calculate shares per token supplied
-            let shares = shares_per_token(
-                &stake_config,
-                &amount.u128(),
-                &total_tokens.0,
-                &total_shares.0,
-            );
-
-            // Update user's shares
-            user_shares.0 += shares;
-            user_shares.save(&mut deps.storage, sender.as_str().as_bytes())?;
-
-            // Update total shares
-            total_shares.0 += shares;
-            total_shares.save(&mut deps.storage)?;
-
-            // Update total staked
-            config.set_total_supply(config.total_supply() + amount.u128());
-            total_tokens.0 += amount.u128();
-            total_tokens.save(&mut deps.storage)?;
-
             // Update user stake
-            add_balance(&mut deps.storage, &sender_canon, amount.u128())?;
+            add_balance(
+                &mut deps.storage,
+                &mut config,
+                &stake_config,
+                &sender,
+                &sender_canon,
+                amount.u128()
+            )?;
 
             // Store data
             store_stake(
@@ -279,79 +357,50 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     let stake_config = StakeConfig::load(&deps.storage)?;
     let mut config = Config::from_storage(&mut deps.storage);
 
+    // Round to that day's public unbonding queue, initialize one if empty
+    let mut daily_unbond_queue = DailyUnbondingQueue::may_load(
+        &deps.storage)?.unwrap_or(DailyUnbondingQueue(BinaryHeap::new()));
+
+    let mut item_found = false;
+    let day = round_date(&env.block.time);
+    for &mut mut item in daily_unbond_queue.0.iter() {
+        if item.release == day {
+            item.unbonding += amount.u128();
+            item_found = true;
+            break
+        }
+    }
+    if !item_found {
+        daily_unbond_queue.0.push(DailyUnbonding::new(amount.u128(), day));
+    }
+
+    daily_unbond_queue.save(&mut deps.storage)?;
+
     // Check if user has an existing queue, if not, init one
-    let unbond_queue = UnbondingQueue::may_load(
+    let mut unbond_queue = UnbondingQueue::may_load(
         &deps.storage, sender.as_str().as_bytes())?
         .unwrap_or(UnbondingQueue(BinaryHeap::new()));
 
-    // Get total supplied tokens
-    let mut total_shares = TotalShares::load(&deps.storage)?;
-    let mut total_tokens = TotalTokens::load(&deps.storage)?;
-
-    let mut user_shares = UserShares::may_load(
-        &deps.storage,
-        sender.as_str().as_bytes()
-    )?.expect("No funds");
-
-    // Calculate shares per token supplied
-    let shares = shares_per_token(
-        &stake_config,
-        &amount.u128(),
-        &total_tokens.0,
-        &total_shares.0,
-    );
-
-    // Check that user has that many tokens
-    if remove_balance(&mut deps.storage, &sender_canon, amount.u128()).is_err() {
-        return Err(StdError::generic_err("Insufficient funds"))
-    }
-
-    // Round to that day's public unbonding queue, initialize one if empty
-
-
     // Add unbonding to user queue
+    unbond_queue.0.push(Unbonding { amount, release: &env.block.time + stake_config.unbond_time });
 
+    unbond_queue.save(&mut deps.storage)?;
 
-    // TODO: move to function since i will reuse this
     // Subtract tokens from user balance
-    remove_balance(&mut deps.storage, &sender_canon, amount.u128())?;
-
-    // Update user's shares
-    if let Some(user_shares) = user_shares.0.checked_sub(shares) {
-        UserShares(user_shares).save(&mut deps.storage, sender.as_str().as_bytes())?;
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
-    }
-
-    // Update total shares
-    if let Some(total) = total_shares.0.checked_sub(shares) {
-        TotalShares(total).save(&mut deps.storage)?;
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
-    }
-
-    // Update total staked
-    if let Some(total) = total_tokens.0.checked_sub(amount.u128()) {
-        TotalTokens(total).save(&mut deps.storage)?;
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
-    }
-    if let Some(total) = config.total_supply().checked_sub(amount.u128()) {
-        config.set_total_supply(total);
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
-    }
-
+    remove_balance(&mut deps.storage, &mut config, &stake_config, &sender, &sender_canon, amount.u128())?;
 
     // Store the tx
-
+    store_unbond(
+        &mut deps.storage,
+        &deps.api.canonical_address(&env.message.sender)?,
+        amount,
+        config.constants()?.symbol,
+        None,
+        &env.block
+    )?;
 
     Ok(HandleResponse {
-        messages,
+        messages: vec![],
         log: vec![],
         data: Some(to_binary(&HandleAnswer::Unbond { status: Success })?),
     })
@@ -361,6 +410,39 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
 ) -> StdResult<HandleResponse> {
+    let sender = &env.message.sender;
+    let stake_config = StakeConfig::load(&deps.storage)?;
+
+    let daily_unbond_queue = DailyUnbondingQueue::load(
+        &deps.storage)?.0;
+
+    // Check if user has an existing queue, if not, init one
+    let mut unbond_queue = UnbondingQueue::may_load(
+        &deps.storage, sender.as_str().as_bytes())?
+        .expect("No unbonding queue found");
+
+    let mut total = Uint128::zero();
+    while unbond_queue.0.peek().is_some() && &unbond_queue.0.peek().unwrap().release < &env.block.time {
+        let unbond = unbond_queue.0.peek().unwrap();
+        if daily_unbond_queue.iter().any(|e| e == unbond) {
+            total += unbond.amount;
+            unbond_queue.0.pop();
+        }
+    }
+
+    unbond_queue.save(&mut deps.storage, sender.as_str().as_bytes())?;
+
+    let messages= vec![send_msg(
+        sender.clone(),
+        total,
+        None,
+        None,
+        None,
+        256,
+        stake_config.staked_token.code_hash,
+        stake_config.staked_token.address
+    )?];
+
     Ok(HandleResponse {
         messages,
         log: vec![],

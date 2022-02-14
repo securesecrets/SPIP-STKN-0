@@ -89,6 +89,6 @@ impl BucketStorage for UnbondingQueue {
 #[serde(rename_all = "snake_case")]
 pub struct DailyUnbondingQueue(pub BinaryHeap<DailyUnbonding>);
 
-impl BucketStorage for DailyUnbondingQueue {
+impl SingletonStorage for DailyUnbondingQueue {
     const NAMESPACE: &'static [u8] = b"daily_unbonding_queue";
 }
