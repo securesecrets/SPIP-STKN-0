@@ -6,7 +6,7 @@ use cosmwasm_std::{
     StdResult, Storage, Uint128,
 };
 
-use crate::batch;
+use crate::{batch, distributors, stake_queries};
 use crate::msg::QueryWithPermit;
 use crate::msg::{
     space_pad, ContractStatusLevel, HandleAnswer, HandleMsg, InitMsg, QueryAnswer, QueryMsg,
@@ -83,15 +83,19 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 
     let prng_seed_hashed = sha_256(&msg.prng_seed.0);
 
-    // TODO: make decimals an optional for specific cases (such as testing)
-
     // Set stake config
-    let staked_token_decimals = token_info_query(
-        &deps.querier,
-        256,
-        msg.staked_token.code_hash,
-        msg.staked_token.address
-    )?.decimals;
+    let staked_token_decimals: u8;
+    if let Some(decimals) = msg.decimals {
+        staked_token_decimals = decimals;
+    }
+    else {
+        staked_token_decimals = token_info_query(
+            &deps.querier,
+            256,
+            msg.staked_token.code_hash,
+            msg.staked_token.address
+        )?.decimals;
+    }
 
     let mut config = Config::from_storage(&mut deps.storage);
     config.set_constants(&Constants {
@@ -126,6 +130,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     StakeConfig{
         unbond_time: msg.unbond_time,
         staked_token: msg.staked_token.clone(),
+        decimal_difference: msg.share_decimals - staked_token_decimals,
         treasury: msg.treasury.clone()
     }.save(&mut deps.storage)?;
 
@@ -179,11 +184,6 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
         ContractStatusLevel::StopAll | ContractStatusLevel::StopAllButRedeems => {
             let response = match msg {
                 HandleMsg::SetContractStatus { level, .. } => set_contract_status(deps, env, level),
-                HandleMsg::Redeem { amount, .. }
-                    if contract_status == ContractStatusLevel::StopAllButRedeems =>
-                {
-                    try_redeem(deps, env, amount)
-                }
                 _ => Err(StdError::generic_err(
                     "This contract is stopped and this action is not allowed",
                 )),
@@ -337,6 +337,11 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 
 pub fn query<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>, msg: QueryMsg) -> QueryResult {
     match msg {
+        QueryMsg::StakeConfig {} => stake_queries::stake_config(&deps),
+        QueryMsg::TotalStaked {} => stake_queries::total_staked(&deps),
+        QueryMsg::StakeRate {} => stake_queries::stake_rate(&deps),
+        QueryMsg::Unbonding { start, end } => stake_queries::unbonding(&deps, start, end),
+        QueryMsg::Distributors {} => distributors::distributors(&deps),
         QueryMsg::TokenInfo {} => query_token_info(&deps.storage),
         QueryMsg::TokenConfig {} => query_token_config(&deps.storage),
         QueryMsg::ContractStatus {} => query_contract_status(&deps.storage),
@@ -361,6 +366,16 @@ fn permit_queries<S: Storage, A: Api, Q: Querier>(
 
     // Permit validated! We can now execute the query.
     match query {
+        QueryWithPermit::Staked { time } => {
+            if !permit.check_permission(&Permission::Balance) {
+                return Err(StdError::generic_err(format!(
+                    "No permission to query balance / stake, got permissions {:?}",
+                    permit.params.permissions
+                )));
+            }
+
+            stake_queries::staked(&deps, account, time)
+        }
         QueryWithPermit::Balance {} => {
             if !permit.check_permission(&Permission::Balance) {
                 return Err(StdError::generic_err(format!(
@@ -429,6 +444,7 @@ pub fn viewing_keys_queries<S: Storage, A: Api, Q: Querier>(
         } else if key.check_viewing_key(expected_key.unwrap().as_slice()) {
             return match msg {
                 // Base
+                QueryMsg::Staked { address, time, .. } => stake_queries::staked(&deps, address, time),
                 QueryMsg::Balance { address, .. } => query_balance(deps, &address),
                 QueryMsg::TransferHistory {
                     address,
@@ -1157,7 +1173,7 @@ fn try_transfer_from<S: Storage, A: Api, Q: Querier>(
     memo: Option<String>,
 ) -> StdResult<HandleResponse> {
     let spender = &env.message.sender;
-    let spender_canon = deps.api.canonical_address(&sender)?;
+    let spender_canon = deps.api.canonical_address(&spender)?;
     let owner_canon = deps.api.canonical_address(owner)?;
     let recipient_canon = deps.api.canonical_address(recipient)?;
     try_transfer_from_impl(
@@ -1796,6 +1812,7 @@ mod tests {
     use cosmwasm_std::testing::*;
     use cosmwasm_std::{from_binary, BlockInfo, ContractInfo, MessageInfo, QueryResponse, WasmMsg};
     use std::any::Any;
+    use shade_protocol::utils::asset::Contract;
 
     // Helper functions
 
@@ -1812,10 +1829,20 @@ mod tests {
             name: "sec-sec".to_string(),
             admin: Some(HumanAddr("admin".to_string())),
             symbol: "SECSEC".to_string(),
-            decimals: 8,
+            decimals: Some(8),
+            share_decimals: 18,
             initial_balances: Some(initial_balances),
-            prng_seed: Binary::from("lolz fun yay".as_bytes()),
+            prng_seed: Binary::from("some seed".as_bytes()),
             config: None,
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
 
         (init(&mut deps, env, init_msg), deps)
@@ -1857,10 +1884,20 @@ mod tests {
             name: "sec-sec".to_string(),
             admin: Some(HumanAddr("admin".to_string())),
             symbol: "SECSEC".to_string(),
-            decimals: 8,
+            decimals: Some(8),
+            share_decimals: 18,
             initial_balances: Some(initial_balances),
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: Some(init_config),
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
 
         (init(&mut deps, env, init_msg), deps)
@@ -3718,13 +3755,23 @@ mod tests {
             name: init_name.clone(),
             admin: Some(init_admin.clone()),
             symbol: init_symbol.clone(),
-            decimals: init_decimals.clone(),
+            decimals: Some(init_decimals.clone()),
+            share_decimals: 18,
             initial_balances: Some(vec![InitialBalance {
                 address: HumanAddr("giannis".to_string()),
                 amount: init_supply,
             }]),
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: Some(init_config),
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(
@@ -3784,13 +3831,23 @@ mod tests {
             name: init_name.clone(),
             admin: Some(init_admin.clone()),
             symbol: init_symbol.clone(),
-            decimals: init_decimals.clone(),
+            decimals: Some(init_decimals.clone()),
+            share_decimals: 18,
             initial_balances: Some(vec![InitialBalance {
                 address: HumanAddr("giannis".to_string()),
                 amount: init_supply,
             }]),
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: Some(init_config),
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(
@@ -3853,13 +3910,23 @@ mod tests {
             name: init_name.clone(),
             admin: Some(init_admin.clone()),
             symbol: init_symbol.clone(),
-            decimals: init_decimals.clone(),
+            decimals: Some(init_decimals.clone()),
+            share_decimals: 18,
             initial_balances: Some(vec![InitialBalance {
                 address: HumanAddr("giannis".to_string()),
                 amount: init_supply,
             }]),
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: Some(init_config),
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(
@@ -3910,13 +3977,23 @@ mod tests {
             name: init_name.clone(),
             admin: Some(init_admin.clone()),
             symbol: init_symbol.clone(),
-            decimals: init_decimals.clone(),
+            decimals: Some(init_decimals.clone()),
+            share_decimals: 18,
             initial_balances: Some(vec![InitialBalance {
                 address: HumanAddr("giannis".to_string()),
                 amount: init_supply,
             }]),
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: Some(init_config),
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(
@@ -3967,13 +4044,23 @@ mod tests {
             name: init_name.clone(),
             admin: Some(init_admin.clone()),
             symbol: init_symbol.clone(),
-            decimals: init_decimals.clone(),
+            decimals: Some(init_decimals.clone()),
+            share_decimals: 18,
             initial_balances: Some(vec![InitialBalance {
                 address: HumanAddr("giannis".to_string()),
                 amount: init_supply,
             }]),
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: Some(init_config),
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(
@@ -4012,13 +4099,23 @@ mod tests {
             name: init_name.clone(),
             admin: Some(init_admin.clone()),
             symbol: init_symbol.clone(),
-            decimals: init_decimals.clone(),
+            decimals: Some(init_decimals.clone()),
+            share_decimals: 18,
             initial_balances: Some(vec![InitialBalance {
                 address: HumanAddr("giannis".to_string()),
                 amount: init_supply,
             }]),
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: None,
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: true,
+            distributors: None
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(

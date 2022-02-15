@@ -1,8 +1,8 @@
-use cosmwasm_std::{Api, Env, Extern, HandleResponse, HumanAddr, Querier, StdResult, Storage, to_binary};
-use shade_protocol::shd_staking::stake::{Distributors, DistributorsEnabled};
+use cosmwasm_std::{Api, Binary, Env, Extern, HandleResponse, HumanAddr, Querier, StdResult, Storage, to_binary};
+use crate::state_staking::{Distributors, DistributorsEnabled};
 use shade_protocol::storage::SingletonStorage;
 use crate::contract::check_if_admin;
-use crate::msg::HandleAnswer;
+use crate::msg::{HandleAnswer, QueryAnswer};
 use crate::msg::ResponseStatus::Success;
 use crate::state::Config;
 
@@ -51,5 +51,14 @@ pub fn try_set_distributors<S: Storage, A: Api, Q: Querier>(
         messages: vec![],
         log: vec![],
         data: Some(to_binary(&HandleAnswer::SetDistributors { status: Success })?),
+    })
+}
+
+pub fn distributors<S: Storage, A: Api, Q: Querier>(
+    deps: &Extern<S, A, Q>,
+) -> StdResult<Binary> {
+
+    to_binary(&QueryAnswer::Distributors {
+        distributors: Distributors::load(&deps.storage)?.0
     })
 }

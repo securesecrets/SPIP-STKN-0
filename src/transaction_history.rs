@@ -535,7 +535,7 @@ pub fn store_stake<S: Storage>(
     let action = StoredTxAction::stake( staker.clone() );
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, redeemer)?;
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }
@@ -553,7 +553,7 @@ pub fn store_add_reward<S: Storage>(
     let action = StoredTxAction::add_reward( staker.clone() );
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, redeemer)?;
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }
@@ -571,7 +571,7 @@ pub fn store_fund_unbond<S: Storage>(
     let action = StoredTxAction::fund_unbond( staker.clone() );
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, redeemer)?;
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }
@@ -589,7 +589,7 @@ pub fn store_unbond<S: Storage>(
     let action = StoredTxAction::unbond( staker.clone() );
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, redeemer)?;
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }
@@ -607,7 +607,7 @@ pub fn store_claim_unbond<S: Storage>(
     let action = StoredTxAction::claim_unbond( staker.clone() );
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, redeemer)?;
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }
@@ -625,7 +625,7 @@ pub fn store_claim_reward<S: Storage>(
     let action = StoredTxAction::claim_reward( staker.clone() );
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, redeemer)?;
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }

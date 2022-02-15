@@ -8,10 +8,8 @@ use crate::transaction_history::{RichTx, Tx};
 use crate::viewing_key::ViewingKey;
 use cosmwasm_std::{Binary, HumanAddr, StdError, StdResult, Uint128};
 use secret_toolkit::permit::Permit;
-use shade_protocol::asset::Contract;
-use shade_protocol::shd_staking::stake::StakeConfig;
 use shade_protocol::utils::asset::Contract;
-use crate::staking::StakeConfig;
+use shade_protocol::shd_staking::stake::StakeConfig;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
 pub struct InitialBalance {
@@ -24,6 +22,8 @@ pub struct InitMsg {
     pub name: String,
     pub admin: Option<HumanAddr>,
     pub symbol: String,
+    // Will default to staked token decimals if not set
+    pub decimals: Option<u8>,
     pub share_decimals: u8,
     pub initial_balances: Option<Vec<InitialBalance>>,
     pub prng_seed: Binary,
@@ -373,7 +373,7 @@ pub enum QueryMsg {
     Staked {
         address: HumanAddr,
         key: String,
-        time: u64,
+        time: Option<u64>,
     },
 
     // Distributors
@@ -415,6 +415,7 @@ pub enum QueryMsg {
 impl QueryMsg {
     pub fn get_validation_params(&self) -> (Vec<&HumanAddr>, ViewingKey) {
         match self {
+            Self::Staked { address, key, ..} => (vec![address], ViewingKey(key.clone())),
             Self::Balance { address, key } => (vec![address], ViewingKey(key.clone())),
             Self::TransferHistory { address, key, .. } => (vec![address], ViewingKey(key.clone())),
             Self::TransactionHistory { address, key, .. } => {
@@ -435,7 +436,7 @@ impl QueryMsg {
 #[serde(rename_all = "snake_case")]
 pub enum QueryWithPermit {
     Staked {
-        time: u64,
+        time: Option<u64>,
     },
 
     // Snip20 stuff
@@ -465,12 +466,16 @@ pub enum QueryAnswer {
         tokens: Uint128,
         shares: Uint128
     },
+    // Shares per token
+    StakeRate {
+        shares: Uint128
+    },
     Staked {
         tokens: Uint128,
         shares: Uint128,
         pending_rewards: Uint128,
         unbonding: Uint128,
-        unbonded: Uint128
+        unbonded: Option<Uint128>
     },
     Unbonding {
         total: Uint128
@@ -539,6 +544,7 @@ pub enum ResponseStatus {
     Failure,
 }
 
+// TODO: expand on this with stopping staking and stuff
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractStatusLevel {

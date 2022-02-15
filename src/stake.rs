@@ -10,7 +10,7 @@ use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
 use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, UnbondingQueue, UnsentStakedTokens, UserShares};
 use crate::state::{Balances, Config, Constants};
-use crate::transaction_history::{store_add_reward, store_claim_reward, store_claim_unbond, store_stake, store_unbond};
+use crate::transaction_history::{store_add_reward, store_claim_reward, store_claim_unbond, store_fund_unbond, store_stake, store_unbond};
 
 pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -29,7 +29,7 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
         stake_config.unbond_time = unbond_time;
     }
 
-    let mut message = vec![];
+    let mut messages = vec![];
 
     if disable_treasury {
         stake_config.treasury = None;
@@ -39,13 +39,13 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
 
         let unsent_tokens = UnsentStakedTokens::load(&deps.storage)?;
         if unsent_tokens.0 != 0 {
-            message.push(send_msg(
+            messages.push(send_msg(
                 treasury,
                 Uint128(unsent_tokens.0),
                 None,
                 None,
                 None,
-                u128,
+                258,
                 stake_config.staked_token.code_hash,
                 stake_config.staked_token.address
             )?);
@@ -81,13 +81,13 @@ fn add_balance<S: Storage>(
 ) -> StdResult<()> {
     // Check if user account exists
     let mut user_shares = UserShares::may_load(
-        &deps.storage,
+        &storage,
         sender.as_str().as_bytes()
     )?.unwrap_or(UserShares(0));
 
     // Get total supplied tokens
-    let mut total_shares = TotalShares::load(&deps.storage)?;
-    let mut total_tokens = TotalTokens::load(&deps.storage)?;
+    let mut total_shares = TotalShares::load(&storage)?;
+    let mut total_tokens = TotalTokens::load(&storage)?;
 
     // Calculate shares per token supplied
     let shares = shares_per_token(
@@ -395,10 +395,45 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
             )?;
         }
 
-        // TODO: add Unbonding, to fund unbond amounts
-        // looks for current unbond pools, if last pool has been funded
-        // if fully unbonded then return remainding amount
-        // also fund with unsent tokens
+        ReceiveType::Unbond => {
+            let mut remaining_amount = amount.u128();
+
+            let mut daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?;
+
+            while !daily_unbond_queue.0.is_empty() {
+                let mut unbond = daily_unbond_queue.0.pop().unwrap();
+                remaining_amount = unbond.fund(remaining_amount);
+                if unbond.is_funded() {
+                    daily_unbond_queue.0.push(unbond);
+                    break
+                }
+            }
+
+            daily_unbond_queue.save(&mut deps.storage)?;
+
+            // Send back if overfunded
+            if remaining_amount > 0 {
+                messages.push(send_msg(
+                    sender,
+                    Uint128(remaining_amount),
+                    None,
+                    None,
+                    None,
+                    256,
+                    stake_config.staked_token.code_hash,
+                    stake_config.staked_token.address
+                )?);
+            }
+
+            store_fund_unbond(
+                &mut deps.storage,
+                &sender_canon,
+                (amount - Uint128(remaining_amount))?,
+                config.constants()?.symbol,
+                None,
+                &env.block
+            )?;
+        }
     };
 
     Ok(HandleResponse {
@@ -488,9 +523,9 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
         .expect("No unbonding queue found");
 
     let mut total = Uint128::zero();
-    while unbond_queue.0.peek().is_some() && &unbond_queue.0.peek().unwrap().release < &env.block.time {
+    while !unbond_queue.0.is_empty() && &unbond_queue.0.peek().unwrap().release < &env.block.time {
         let unbond = unbond_queue.0.peek().unwrap();
-        if daily_unbond_queue.iter().any(|e| e == unbond) {
+        if daily_unbond_queue.iter().any(|e| e.release == unbond.release && e.is_funded()) {
             total += unbond.amount;
             unbond_queue.0.pop();
         }
@@ -649,6 +684,7 @@ mod tests {
         StakeConfig {
             unbond_time: 0,
             staked_token: Contract { address: Default::default(), code_hash: "".to_string() },
+            decimal_difference: 0,
             treasury: None
         }
     }
