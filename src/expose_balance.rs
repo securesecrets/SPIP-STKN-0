@@ -12,7 +12,7 @@ pub fn try_expose_balance<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     recipient: HumanAddr,
-    code_hash: String,
+    code_hash: Option<String>,
     msg: Option<Binary>,
     memo: Option<String>
 ) -> StdResult<HandleResponse> {

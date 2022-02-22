@@ -89,8 +89,8 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
         account.as_str().as_bytes()
     )?.0;
 
-    let mut unbonding = 0;
-    let mut unbonded = 0;
+    let mut unbonding = Uint128::zero();
+    let mut unbonded = Uint128::zero();
 
     while !queue.is_empty() {
         let item = queue.pop().unwrap();
@@ -111,10 +111,10 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
         tokens: Uint128(tokens),
         shares: Uint128(shares),
         pending_rewards: Uint128(rewards),
-        unbonding: Uint128(unbonding),
+        unbonding,
         unbonded: match time {
             None => None,
-            Some(_) => Some(Uint128(unbonded))
+            Some(_) => Some(unbonded)
         }
     })
 }

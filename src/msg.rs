@@ -17,6 +17,8 @@ pub struct InitialBalance {
     pub amount: Uint128,
 }
 
+//TODO: remove references to deposit and redeem
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InitMsg {
     pub name: String,
@@ -112,7 +114,7 @@ pub enum HandleMsg {
     // Balance
     ExposeBalance {
         recipient: HumanAddr,
-        code_hash: String,
+        code_hash: Option<String>,
         msg: Option<Binary>,
         memo: Option<String>,
         padding: String
@@ -495,8 +497,6 @@ pub enum QueryAnswer {
     },
     TokenConfig {
         public_total_supply: bool,
-        deposit_enabled: bool,
-        redeem_enabled: bool,
         mint_enabled: bool,
         burn_enabled: bool,
     },

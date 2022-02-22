@@ -488,40 +488,6 @@ pub fn store_burn<S: Storage>(
     Ok(())
 }
 
-pub fn store_deposit<S: Storage>(
-    store: &mut S,
-    recipient: &CanonicalAddr,
-    amount: Uint128,
-    denom: String,
-    block: &cosmwasm_std::BlockInfo,
-) -> StdResult<()> {
-    let id = increment_tx_count(store)?;
-    let coins = Coin { denom, amount };
-    let action = StoredTxAction::deposit();
-    let tx = StoredRichTx::new(id, action, coins, None, block);
-
-    append_tx(store, &tx, recipient)?;
-
-    Ok(())
-}
-
-pub fn store_redeem<S: Storage>(
-    store: &mut S,
-    redeemer: &CanonicalAddr,
-    amount: Uint128,
-    denom: String,
-    block: &cosmwasm_std::BlockInfo,
-) -> StdResult<()> {
-    let id = increment_tx_count(store)?;
-    let coins = Coin { denom, amount };
-    let action = StoredTxAction::redeem();
-    let tx = StoredRichTx::new(id, action, coins, None, block);
-
-    append_tx(store, &tx, redeemer)?;
-
-    Ok(())
-}
-
 pub fn store_stake<S: Storage>(
     store: &mut S,
     staker: &CanonicalAddr,
