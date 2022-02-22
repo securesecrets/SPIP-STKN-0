@@ -324,7 +324,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
         return Err(StdError::generic_err("No receive type supplied in message"))
     }
 
-    let mut config = Config::from_storage(&mut deps.storage);
+    let symbol = ReadonlyConfig::from_storage(& deps.storage).constants()?.symbol;
     let mut messages = vec![];
     match receive_type {
         ReceiveType::Bond => {
@@ -343,7 +343,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
                 &mut deps.storage,
                 &sender_canon,
                 amount,
-                config.constants()?.symbol,
+                symbol,
                 memo,
                 &env.block
             )?;
@@ -378,7 +378,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
                 &mut deps.storage,
                 &sender_canon,
                 amount,
-                config.constants()?.symbol,
+                symbol,
                 memo,
                 &env.block
             )?;
@@ -418,7 +418,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
                 &mut deps.storage,
                 &sender_canon,
                 (amount - Uint128(remaining_amount))?,
-                config.constants()?.symbol,
+                symbol,
                 None,
                 &env.block
             )?;
@@ -442,13 +442,12 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     let sender_canon = deps.api.canonical_address(&sender)?;
 
     let stake_config = StakeConfig::load(&deps.storage)?;
-    let mut config = Config::from_storage(&mut deps.storage);
 
     // Round to that day's public unbonding queue, initialize one if empty
     let mut daily_unbond_queue = DailyUnbondingQueue::may_load(
         &deps.storage)?.unwrap_or(DailyUnbondingQueue(BinaryHeap::new()));
 
-    let mut daily_unbond_arr = daily_unbond_queue.0.into_vec();
+    let mut daily_unbond_arr = daily_unbond_queue.0.clone().into_vec();
 
     // Look for the day of unbondin, if not found then create one
     let mut item_found = false;
@@ -481,11 +480,12 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     remove_balance(&mut deps.storage, &stake_config, &sender, &sender_canon, amount.u128())?;
 
     // Store the tx
+    let symbol = ReadonlyConfig::from_storage(&deps.storage).constants()?.symbol;
     store_unbond(
         &mut deps.storage,
-        &deps.api.canonical_address(&env.message.sender)?,
+        &deps.api.canonical_address(&sender)?,
         amount,
-        config.constants()?.symbol,
+        symbol,
         None,
         &env.block
     )?;

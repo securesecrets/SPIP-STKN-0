@@ -92,8 +92,8 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         staked_token_decimals = token_info_query(
             &deps.querier,
             256,
-            msg.staked_token.code_hash,
-            msg.staked_token.address
+            msg.staked_token.code_hash.clone(),
+            msg.staked_token.address.clone()
         )?.decimals;
     }
 
@@ -1275,7 +1275,7 @@ fn try_send_from<S: Storage, A: Api, Q: Querier>(
     memo: Option<String>,
     msg: Option<Binary>,
 ) -> StdResult<HandleResponse> {
-    let spender = &env.message.sender;
+    let spender = &env.message.sender.clone();
     let spender_canon = deps.api.canonical_address(spender)?;
 
     let mut messages = vec![];
