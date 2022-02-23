@@ -1,5 +1,5 @@
 use std::collections::BinaryHeap;
-use cosmwasm_std::HumanAddr;
+use cosmwasm_std::{HumanAddr, Uint128};
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use shade_protocol::shd_staking::stake::{DailyUnbonding, Unbonding};
@@ -8,7 +8,7 @@ use shade_protocol::storage::{BucketStorage, SingletonStorage};
 // used to determine what each token is worth to calculate rewards
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct TotalShares(pub u128);
+pub struct TotalShares(pub Uint128);
 
 impl SingletonStorage for TotalShares {
     const NAMESPACE: &'static [u8] = b"total_shares";
@@ -17,7 +17,7 @@ impl SingletonStorage for TotalShares {
 // used to separate tokens minted from total tokens (includes rewards)
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct TotalTokens(pub u128);
+pub struct TotalTokens(pub Uint128);
 
 impl SingletonStorage for TotalTokens {
     const NAMESPACE: &'static [u8] = b"total_tokens";
@@ -25,7 +25,7 @@ impl SingletonStorage for TotalTokens {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct UserShares(pub u128);
+pub struct UserShares(pub Uint128);
 
 impl BucketStorage for UserShares {
     const NAMESPACE: &'static [u8] = b"user_shares";
@@ -34,7 +34,7 @@ impl BucketStorage for UserShares {
 // stores received token info if no treasury is set
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct UnsentStakedTokens(pub u128);
+pub struct UnsentStakedTokens(pub Uint128);
 
 impl SingletonStorage for UnsentStakedTokens {
     const NAMESPACE: &'static [u8] = b"unsent_staked_tokens";
@@ -42,7 +42,7 @@ impl SingletonStorage for UnsentStakedTokens {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct TotalUnbonding(pub u128);
+pub struct TotalUnbonding(pub Uint128);
 
 impl SingletonStorage for TotalUnbonding {
     const NAMESPACE: &'static [u8] = b"total_unbonding";
@@ -51,7 +51,7 @@ impl SingletonStorage for TotalUnbonding {
 // used to check if unbonding id funded
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct UnbondingIsFunded(pub bool);
+pub struct UnbondingIsFunded(pub Uint128);
 
 impl SingletonStorage for UnbondingIsFunded {
     const NAMESPACE: &'static [u8] = b"unbonding_is_funded";

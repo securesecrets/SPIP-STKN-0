@@ -38,10 +38,10 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
         stake_config.treasury = Some(treasury.clone());
 
         let unsent_tokens = UnsentStakedTokens::load(&deps.storage)?;
-        if unsent_tokens.0 != 0 {
+        if unsent_tokens.0 != Uint128::zero() {
             messages.push(send_msg(
                 treasury,
-                Uint128(unsent_tokens.0),
+                unsent_tokens.0,
                 None,
                 None,
                 None,
@@ -49,7 +49,7 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
                 stake_config.staked_token.code_hash,
                 stake_config.staked_token.address
             )?);
-            UnsentStakedTokens(0).save(&mut deps.storage)?;
+            UnsentStakedTokens(Uint128::zero()).save(&mut deps.storage)?;
         }
     }
 
@@ -80,19 +80,19 @@ fn add_balance<S: Storage>(
 ) -> StdResult<()> {
     // Check if user account exists
     let mut user_shares = UserShares::may_load(storage, sender.as_str().as_bytes())?
-        .unwrap_or(UserShares(0));
+        .unwrap_or(UserShares(Uint128::zero()));
 
     // Get total supplied tokens
     let mut total_shares = TotalShares::load(storage)?;
     let mut total_tokens = TotalTokens::load(storage)?;
 
     // Calculate shares per token supplied
-    let shares = shares_per_token(
+    let shares = Uint128(shares_per_token(
         &stake_config,
         &amount,
-        &total_tokens.0,
-        &total_shares.0,
-    );
+        &total_tokens.0.u128(),
+        &total_shares.0.u128(),
+    ));
 
     // Update user's shares
     user_shares.0 += shares;
@@ -105,7 +105,7 @@ fn add_balance<S: Storage>(
     // Update total staked
     let supply = ReadonlyConfig::from_storage(storage).total_supply();
     Config::from_storage(storage).set_total_supply(supply + amount);
-    total_tokens.0 += amount;
+    total_tokens.0 += Uint128(amount);
     total_tokens.save(storage)?;
 
     // Update user staked / tokens
@@ -134,16 +134,16 @@ fn subtract_internal_supply<S: Storage>(
     tokens: u128,
 ) -> StdResult<()> {
     // Update total shares
-    if let Some(total) = total_shares.0.checked_sub(shares) {
-        TotalShares(total).save(storage)?;
+    if let Some(total) = total_shares.0.u128().checked_sub(shares) {
+        TotalShares(Uint128(total)).save(storage)?;
     }
     else {
         return Err(StdError::generic_err("Insufficient shares"))
     }
 
     // Update total staked
-    if let Some(total) = total_tokens.0.checked_sub(tokens) {
-        TotalTokens(total).save(storage)?;
+    if let Some(total) = total_tokens.0.u128().checked_sub(tokens) {
+        TotalTokens(Uint128(total)).save(storage)?;
     }
     else {
         return Err(StdError::generic_err("Insufficient shares"))
@@ -181,13 +181,13 @@ fn remove_balance<S: Storage>(
     let shares = shares_per_token(
         &stake_config,
         &amount,
-        &total_tokens.0,
-        &total_shares.0,
+        &total_tokens.0.u128(),
+        &total_shares.0.u128(),
     );
 
     // Update user's shares
-    if let Some(user_shares) = user_shares.0.checked_sub(shares) {
-        UserShares(user_shares).save(storage, sender.as_str().as_bytes())?;
+    if let Some(user_shares) = user_shares.0.u128().checked_sub(shares) {
+        UserShares(Uint128(user_shares)).save(storage, sender.as_str().as_bytes())?;
     }
     else {
         return Err(StdError::generic_err("Insufficient shares"))
@@ -230,10 +230,11 @@ fn claim_rewards<S: Storage>(
     let mut total_tokens = TotalTokens::load(storage)?;
 
     let (reward_shares, reward_token) = calculate_rewards(
-        stake_config, user_balance, user_shares.0, total_tokens.0, total_shares.0);
+        stake_config, user_balance, user_shares.0.u128(),
+        total_tokens.0.u128(), total_shares.0.u128());
 
-    if let Some(user_shares) = user_shares.0.checked_sub(reward_shares) {
-        UserShares(user_shares).save(storage, sender.as_str().as_bytes())?;
+    if let Some(user_shares) = user_shares.0.u128().checked_sub(reward_shares) {
+        UserShares(Uint128(user_shares)).save(storage, sender.as_str().as_bytes())?;
     }
     else {
         return Err(StdError::generic_err("Insufficient shares"))
@@ -279,7 +280,7 @@ pub fn tokens_per_share(
         return shares / token_multiplier
     }
 
-    shares / (total_tokens * token_multiplier) * total_shares
+    (shares / token_multiplier) / total_tokens * (total_shares / token_multiplier)
 }
 
 ///
@@ -363,14 +364,14 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
             }
             else {
                 let mut stored_tokens = UnsentStakedTokens::load(&deps.storage)?;
-                stored_tokens.0 += amount.u128();
+                stored_tokens.0 += amount;
                 stored_tokens.save(&mut deps.storage)?;
             }
         }
 
         ReceiveType::Reward => {
             let mut total_tokens = TotalTokens::load(&deps.storage)?;
-            total_tokens.0 += amount.u128();
+            total_tokens.0 += amount;
             total_tokens.save(&mut deps.storage)?;
 
             // Store data
@@ -606,12 +607,12 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
     let sender = &env.message.sender;
     let sender_canon = &deps.api.canonical_address(sender)?;
 
-    let claim = claim_rewards(&mut deps.storage, &stake_config, sender, sender_canon)?;
+    let claim = Uint128(claim_rewards(&mut deps.storage, &stake_config, sender, sender_canon)?);
 
     store_claim_reward(
         &mut deps.storage,
         sender_canon,
-        Uint128(claim),
+        claim,
         symbol.clone(),
         None,
         &env.block
@@ -624,14 +625,14 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
         &stake_config,
         &sender,
         &sender_canon,
-        claim
+        claim.u128()
     )?;
 
     // Store data
     store_stake(
         &mut deps.storage,
         &sender_canon,
-        Uint128(claim),
+        claim,
         symbol,
         None,
         &env.block
@@ -643,7 +644,7 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
     if let Some(treasury) = stake_config.treasury {
         messages.push(send_msg(
             treasury,
-            Uint128(claim),
+            claim,
             None,
             None,
             None,
@@ -669,18 +670,16 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
 mod tests {
     use shade_protocol::shd_staking::stake::StakeConfig;
     use shade_protocol::utils::asset::Contract;
-    use crate::stake::shares_per_token;
+    use crate::stake::{shares_per_token, tokens_per_share};
 
     fn init_config(token_decimals: u8, shares_decimals: u8) -> StakeConfig {
         StakeConfig {
             unbond_time: 0,
             staked_token: Contract { address: Default::default(), code_hash: "".to_string() },
-            decimal_difference: 0,
+            decimal_difference: shares_decimals - token_decimals,
             treasury: None
         }
     }
-
-    // TODO: test functions used by handlemsgs by simulating storages
 
     #[test]
     fn tokens_per_share_test() {
@@ -691,13 +690,17 @@ mod tests {
         let token_1 = 1 * 10u128.pow(token_decimals.into());
         let share_1 = 1 * 10u128.pow(shares_decimals.into());
 
-        // Check for proper init when no tokens are present
+        // Check for proper init
+        assert_eq!(tokens_per_share(&config, &share_1, &0, &0), token_1);
 
+        // Check for stability
+        assert_eq!(tokens_per_share(&config, &share_1, &token_1, &share_1), token_1);
 
-        // check that tokens increase when shares decrease
+        // check that shares increase when tokens decrease
+        assert!(tokens_per_share(&config, &share_1, &(token_1*2), &share_1) < token_1);
 
-
-        // check that tokens decrease when shares increase
+        // check that shares decrease when tokens increase
+        assert!(tokens_per_share(&config, &share_1, &token_1, &(share_1*2)) > token_1);
 
 
     }

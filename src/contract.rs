@@ -135,12 +135,12 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     }.save(&mut deps.storage)?;
 
     // Set shares state to 0
-    TotalShares(0).save(&mut deps.storage)?;
+    TotalShares(Uint128::zero()).save(&mut deps.storage)?;
 
     // Set tokens
-    TotalTokens(0).save(&mut deps.storage)?;
+    TotalTokens(Uint128::zero()).save(&mut deps.storage)?;
 
-    UnsentStakedTokens(0).save(&mut deps.storage)?;
+    UnsentStakedTokens(Uint128::zero()).save(&mut deps.storage)?;
 
     // Register receive if necessary
     let mut messages = vec![];
@@ -1814,7 +1814,38 @@ mod tests {
             decimals: Some(8),
             share_decimals: 18,
             initial_balances: Some(initial_balances),
-            prng_seed: Binary::from("some seed".as_bytes()),
+            prng_seed: Binary::from("lolz fun yay".as_bytes()),
+            config: None,
+            unbond_time: 10,
+            staked_token: Contract {
+                address: HumanAddr("token".to_string()),
+                code_hash: "hash".to_string()
+            },
+            treasury: Some(HumanAddr("treasury".to_string())),
+            treasury_code_hash: None,
+            limit_transfer: false,
+            distributors: None
+        };
+
+        (init(&mut deps, env, init_msg), deps)
+    }
+
+    fn init_helper_staking(
+    ) -> (
+        StdResult<InitResponse>,
+        Extern<MockStorage, MockApi, MockQuerier>,
+    ) {
+        let mut deps = mock_dependencies(20, &[]);
+        let env = mock_env("instantiator", &[]);
+
+        let init_msg = InitMsg {
+            name: "sec-sec".to_string(),
+            admin: Some(HumanAddr("admin".to_string())),
+            symbol: "SECSEC".to_string(),
+            decimals: Some(8),
+            share_decimals: 18,
+            initial_balances: None,
+            prng_seed: Binary::from("lolz fun yay".as_bytes()),
             config: None,
             unbond_time: 10,
             staked_token: Contract {
@@ -1824,7 +1855,7 @@ mod tests {
             treasury: Some(HumanAddr("treasury".to_string())),
             treasury_code_hash: None,
             limit_transfer: true,
-            distributors: None
+            distributors: Some(vec![HumanAddr("distributor".to_string())])
         };
 
         (init(&mut deps, env, init_msg), deps)
@@ -1932,6 +1963,15 @@ mod tests {
         let handle_result: HandleAnswer = from_binary(&handle_result.data.unwrap()).unwrap();
 
         match handle_result {
+            | HandleAnswer::UpdateStakeConfig { status: ResponseStatus }
+            | HandleAnswer::Receive { status: ResponseStatus }
+            | HandleAnswer::Unbond { status: ResponseStatus }
+            | HandleAnswer::ClaimUnbond { status: ResponseStatus }
+            | HandleAnswer::ClaimRewards { status: ResponseStatus }
+            | HandleAnswer::StakeRewards { status: ResponseStatus }
+            | HandleAnswer::ExposeBalance { status: ResponseStatus }
+            | HandleAnswer::AddDistributors { status: ResponseStatus }
+            | HandleAnswer::SetDistributors { status: ResponseStatus }
             | HandleAnswer::Transfer { status }
             | HandleAnswer::Send { status }
             | HandleAnswer::Burn { status }
@@ -2042,6 +2082,14 @@ mod tests {
     }
 
     // Handle tests
+    // TODO: test update stake config
+    // TODO: test receive
+    // TODO: test unbond
+    // TODO: test claim unbond
+    // TODO: test claim rewards
+    // TODO: test stake rewards
+    // TODO: test add distributors
+    // TODO: test set distributors
 
     #[test]
     fn test_handle_transfer() {
@@ -3700,265 +3748,6 @@ mod tests {
     }
 
     #[test]
-    fn test_query_exchange_rate() {
-        // test more dec than SCRT
-        let init_name = "sec-sec".to_string();
-        let init_admin = HumanAddr("admin".to_string());
-        let init_symbol = "SECSEC".to_string();
-        let init_decimals = 8;
-
-        let init_supply = Uint128(5000);
-
-        let mut deps = mock_dependencies(20, &[]);
-        let env = mock_env("instantiator", &[]);
-        let init_config: InitConfig = from_binary(&Binary::from(
-            format!(
-                "{{\"public_total_supply\":{},
-            \"enable_deposit\":{},
-            \"enable_redeem\":{},
-            \"enable_mint\":{},
-            \"enable_burn\":{}}}",
-                true, true, false, false, false
-            )
-            .as_bytes(),
-        ))
-        .unwrap();
-        let init_msg = InitMsg {
-            name: init_name.clone(),
-            admin: Some(init_admin.clone()),
-            symbol: init_symbol.clone(),
-            decimals: Some(init_decimals.clone()),
-            share_decimals: 18,
-            initial_balances: Some(vec![InitialBalance {
-                address: HumanAddr("giannis".to_string()),
-                amount: init_supply,
-            }]),
-            prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: Some(init_config),
-            unbond_time: 10,
-            staked_token: Contract {
-                address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
-            },
-            treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
-            limit_transfer: true,
-            distributors: None
-        };
-        let init_result = init(&mut deps, env, init_msg);
-        assert!(
-            init_result.is_ok(),
-            "Init failed: {}",
-            init_result.err().unwrap()
-        );
-
-        let query_msg = QueryMsg::ExchangeRate {};
-        let query_result = query(&deps, query_msg);
-        assert!(
-            query_result.is_ok(),
-            "Init failed: {}",
-            query_result.err().unwrap()
-        );
-        let query_answer: QueryAnswer = from_binary(&query_result.unwrap()).unwrap();
-        match query_answer {
-            QueryAnswer::ExchangeRate { rate, denom } => {
-                assert_eq!(rate, Uint128(100));
-                assert_eq!(denom, "SCRT");
-            }
-            _ => panic!("unexpected"),
-        }
-
-        // test same number of decimals as SCRT
-        let init_name = "sec-sec".to_string();
-        let init_admin = HumanAddr("admin".to_string());
-        let init_symbol = "SECSEC".to_string();
-        let init_decimals = 6;
-
-        let init_supply = Uint128(5000);
-
-        let mut deps = mock_dependencies(20, &[]);
-        let env = mock_env("instantiator", &[]);
-        let init_config: InitConfig = from_binary(&Binary::from(
-            format!(
-                "{{\"public_total_supply\":{},
-            \"enable_deposit\":{},
-            \"enable_redeem\":{},
-            \"enable_mint\":{},
-            \"enable_burn\":{}}}",
-                true, true, false, false, false
-            )
-            .as_bytes(),
-        ))
-        .unwrap();
-        let init_msg = InitMsg {
-            name: init_name.clone(),
-            admin: Some(init_admin.clone()),
-            symbol: init_symbol.clone(),
-            decimals: Some(init_decimals.clone()),
-            share_decimals: 18,
-            initial_balances: Some(vec![InitialBalance {
-                address: HumanAddr("giannis".to_string()),
-                amount: init_supply,
-            }]),
-            prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: Some(init_config),
-            unbond_time: 10,
-            staked_token: Contract {
-                address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
-            },
-            treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
-            limit_transfer: true,
-            distributors: None
-        };
-        let init_result = init(&mut deps, env, init_msg);
-        assert!(
-            init_result.is_ok(),
-            "Init failed: {}",
-            init_result.err().unwrap()
-        );
-
-        let query_msg = QueryMsg::ExchangeRate {};
-        let query_result = query(&deps, query_msg);
-        assert!(
-            query_result.is_ok(),
-            "Init failed: {}",
-            query_result.err().unwrap()
-        );
-        let query_answer: QueryAnswer = from_binary(&query_result.unwrap()).unwrap();
-        match query_answer {
-            QueryAnswer::ExchangeRate { rate, denom } => {
-                assert_eq!(rate, Uint128(1));
-                assert_eq!(denom, "SCRT");
-            }
-            _ => panic!("unexpected"),
-        }
-
-        // test less decimal places than SCRT
-        let init_name = "sec-sec".to_string();
-        let init_admin = HumanAddr("admin".to_string());
-        let init_symbol = "SECSEC".to_string();
-        let init_decimals = 3;
-
-        let init_supply = Uint128(5000);
-
-        let mut deps = mock_dependencies(20, &[]);
-        let env = mock_env("instantiator", &[]);
-        let init_config: InitConfig = from_binary(&Binary::from(
-            format!(
-                "{{\"public_total_supply\":{},
-            \"enable_deposit\":{},
-            \"enable_redeem\":{},
-            \"enable_mint\":{},
-            \"enable_burn\":{}}}",
-                true, true, false, false, false
-            )
-            .as_bytes(),
-        ))
-        .unwrap();
-        let init_msg = InitMsg {
-            name: init_name.clone(),
-            admin: Some(init_admin.clone()),
-            symbol: init_symbol.clone(),
-            decimals: Some(init_decimals.clone()),
-            share_decimals: 18,
-            initial_balances: Some(vec![InitialBalance {
-                address: HumanAddr("giannis".to_string()),
-                amount: init_supply,
-            }]),
-            prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: Some(init_config),
-            unbond_time: 10,
-            staked_token: Contract {
-                address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
-            },
-            treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
-            limit_transfer: true,
-            distributors: None
-        };
-        let init_result = init(&mut deps, env, init_msg);
-        assert!(
-            init_result.is_ok(),
-            "Init failed: {}",
-            init_result.err().unwrap()
-        );
-
-        let query_msg = QueryMsg::ExchangeRate {};
-        let query_result = query(&deps, query_msg);
-        assert!(
-            query_result.is_ok(),
-            "Init failed: {}",
-            query_result.err().unwrap()
-        );
-        let query_answer: QueryAnswer = from_binary(&query_result.unwrap()).unwrap();
-        match query_answer {
-            QueryAnswer::ExchangeRate { rate, denom } => {
-                assert_eq!(rate, Uint128(1000));
-                assert_eq!(denom, "SECSEC");
-            }
-            _ => panic!("unexpected"),
-        }
-
-        // test depost/redeem not enabled
-        let init_name = "sec-sec".to_string();
-        let init_admin = HumanAddr("admin".to_string());
-        let init_symbol = "SECSEC".to_string();
-        let init_decimals = 3;
-
-        let init_supply = Uint128(5000);
-
-        let mut deps = mock_dependencies(20, &[]);
-        let env = mock_env("instantiator", &[]);
-        let init_msg = InitMsg {
-            name: init_name.clone(),
-            admin: Some(init_admin.clone()),
-            symbol: init_symbol.clone(),
-            decimals: Some(init_decimals.clone()),
-            share_decimals: 18,
-            initial_balances: Some(vec![InitialBalance {
-                address: HumanAddr("giannis".to_string()),
-                amount: init_supply,
-            }]),
-            prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: None,
-            unbond_time: 10,
-            staked_token: Contract {
-                address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
-            },
-            treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
-            limit_transfer: true,
-            distributors: None
-        };
-        let init_result = init(&mut deps, env, init_msg);
-        assert!(
-            init_result.is_ok(),
-            "Init failed: {}",
-            init_result.err().unwrap()
-        );
-
-        let query_msg = QueryMsg::ExchangeRate {};
-        let query_result = query(&deps, query_msg);
-        assert!(
-            query_result.is_ok(),
-            "Init failed: {}",
-            query_result.err().unwrap()
-        );
-        let query_answer: QueryAnswer = from_binary(&query_result.unwrap()).unwrap();
-        match query_answer {
-            QueryAnswer::ExchangeRate { rate, denom } => {
-                assert_eq!(rate, Uint128(0));
-                assert_eq!(denom, String::new());
-            }
-            _ => panic!("unexpected"),
-        }
-    }
-
-    #[test]
     fn test_query_allowance() {
         let (init_result, mut deps) = init_helper(vec![InitialBalance {
             address: HumanAddr("giannis".to_string()),
@@ -4349,7 +4138,7 @@ mod tests {
         };
 
         use crate::transaction_history::{RichTx, TxAction};
-        // TODO: This should feault because of the new tx history
+        // TODO: This should fault because of the new tx history
         let expected_transfers = [
             RichTx {
                 id: 8,

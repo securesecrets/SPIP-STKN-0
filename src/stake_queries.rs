@@ -18,8 +18,8 @@ pub fn total_staked<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<Binary> {
 
     to_binary(&QueryAnswer::TotalStaked {
-        tokens: Uint128(TotalTokens::load(&deps.storage)?.0),
-        shares: Uint128(TotalShares::load(&deps.storage)?.0)
+        tokens: TotalTokens::load(&deps.storage)?.0,
+        shares: TotalShares::load(&deps.storage)?.0
     })
 }
 
@@ -31,8 +31,8 @@ pub fn stake_rate<S: Storage, A: Api, Q: Querier>(
         shares: Uint128(shares_per_token(
             &StakeConfig::load(&deps.storage)?,
             &1,
-            &TotalTokens::load(&deps.storage)?.0,
-            &TotalShares::load(&deps.storage)?.0
+            &TotalTokens::load(&deps.storage)?.0.u128(),
+            &TotalShares::load(&deps.storage)?.0.u128()
         ))
     })
 }
@@ -79,9 +79,9 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
     let (rewards, _) = calculate_rewards(
         &StakeConfig::load(&deps.storage)?,
         tokens,
-        shares,
-        TotalTokens::load(&deps.storage)?.0,
-        TotalShares::load(&deps.storage)?.0
+        shares.u128(),
+        TotalTokens::load(&deps.storage)?.0.u128(),
+        TotalShares::load(&deps.storage)?.0.u128()
     );
 
     let mut queue = UnbondingQueue::load(
@@ -109,7 +109,7 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
 
     to_binary(&QueryAnswer::Staked {
         tokens: Uint128(tokens),
-        shares: Uint128(shares),
+        shares,
         pending_rewards: Uint128(rewards),
         unbonding,
         unbonded: match time {
