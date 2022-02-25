@@ -1,5 +1,6 @@
 use std::collections::BinaryHeap;
-use cosmwasm_std::{Api, Binary, CanonicalAddr, Env, Extern, from_binary, HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, to_binary, Uint128};
+use cosmwasm_std::{Api, Binary, CanonicalAddr, Decimal, Env, Extern, from_binary, HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, to_binary, Uint128};
+use ethnum::u256;
 use secret_toolkit::snip20::{register_receive_msg, send_msg};
 use shade_protocol::shd_staking::ReceiveType;
 use shade_protocol::shd_staking::stake::{DailyUnbonding, StakeConfig, Unbonding};
@@ -46,12 +47,14 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
                 None,
                 None,
                 258,
-                stake_config.staked_token.code_hash,
-                stake_config.staked_token.address
+                stake_config.staked_token.code_hash.clone(),
+                stake_config.staked_token.address.clone()
             )?);
             UnsentStakedTokens(Uint128::zero()).save(&mut deps.storage)?;
         }
     }
+
+    stake_config.save(&mut deps.storage)?;
 
     Ok(HandleResponse {
         messages,
@@ -257,14 +260,13 @@ pub fn shares_per_token(
     total_tokens: &u128,
     total_shares: &u128
 ) -> u128 {
-    // Used to normalize the staked token to the stake token
-    let token_multiplier = 10u128.pow(config.decimal_difference.into());
-
     if *total_tokens == 0 && *total_shares == 0 {
+        // Used to normalize the staked token to the stake token
+        let token_multiplier = 10u128.pow(config.decimal_difference.into());
         return tokens * token_multiplier
     }
 
-    (tokens * token_multiplier) * total_shares / (total_tokens * token_multiplier)
+    tokens * total_shares / total_tokens
 }
 
 pub fn tokens_per_share(
@@ -273,14 +275,13 @@ pub fn tokens_per_share(
     total_tokens: &u128,
     total_shares: &u128
 ) -> u128 {
-    // Used to normalize the staked token to the stake token
-    let token_multiplier = 10u128.pow(config.decimal_difference.into());
-
     if *total_tokens == 0 && *total_shares == 0 {
+        // Used to normalize the staked token to the stake token
+        let token_multiplier = 10u128.pow(config.decimal_difference.into());
         return shares / token_multiplier
     }
 
-    (shares / token_multiplier) / total_tokens * (total_shares / token_multiplier)
+    (u256::from(*total_tokens) * u256::from(*shares) / u256::from(*total_shares)).as_u128()
 }
 
 ///
@@ -629,6 +630,7 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
     )?;
 
     // Store data
+    // Store data
     store_stake(
         &mut deps.storage,
         &sender_canon,
@@ -670,7 +672,7 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
 mod tests {
     use shade_protocol::shd_staking::stake::StakeConfig;
     use shade_protocol::utils::asset::Contract;
-    use crate::stake::{shares_per_token, tokens_per_share};
+    use crate::stake::{calculate_rewards, round_date, shares_per_token, tokens_per_share};
 
     fn init_config(token_decimals: u8, shares_decimals: u8) -> StakeConfig {
         StakeConfig {
@@ -687,21 +689,21 @@ mod tests {
         let shares_decimals = 18;
         let config = init_config(token_decimals, shares_decimals);
 
-        let token_1 = 1 * 10u128.pow(token_decimals.into());
-        let share_1 = 1 * 10u128.pow(shares_decimals.into());
+        let token_1 = 10000000 * 10u128.pow(token_decimals.into());
+        let share_1 = 10000000 * 10u128.pow(shares_decimals.into());
 
         // Check for proper init
         assert_eq!(tokens_per_share(&config, &share_1, &0, &0), token_1);
 
         // Check for stability
         assert_eq!(tokens_per_share(&config, &share_1, &token_1, &share_1), token_1);
+        assert_eq!(tokens_per_share(&config, &share_1, &(token_1*2), &(share_1*2)), token_1);
 
         // check that shares increase when tokens decrease
-        assert!(tokens_per_share(&config, &share_1, &(token_1*2), &share_1) < token_1);
+        assert!(tokens_per_share(&config, &share_1, &(token_1*2), &share_1) > token_1);
 
         // check that shares decrease when tokens increase
-        assert!(tokens_per_share(&config, &share_1, &token_1, &(share_1*2)) > token_1);
-
+        assert!(tokens_per_share(&config, &share_1, &token_1, &(share_1*2)) < token_1);
 
     }
 
@@ -711,19 +713,44 @@ mod tests {
         let shares_decimals = 18;
         let config = init_config(token_decimals, shares_decimals);
 
-        let token_1 = 1 * 10u128.pow(token_decimals.into());
-        let share_1 = 1 * 10u128.pow(shares_decimals.into());
+        let token_1 = 100 * 10u128.pow(token_decimals.into());
+        let share_1 = 100 * 10u128.pow(shares_decimals.into());
 
         // Check for proper init
         assert_eq!(shares_per_token(&config, &token_1, &0, &0), share_1);
 
         // Check for stability
         assert_eq!(shares_per_token(&config, &token_1, &token_1, &share_1), share_1);
+        assert_eq!(shares_per_token(&config, &token_1, &(token_1*2), &(share_1*2)), share_1);
 
         // check that shares increase when tokens decrease
         assert!(shares_per_token(&config, &token_1, &(token_1*2), &share_1) < share_1);
 
         // check that shares decrease when tokens increase
         assert!(shares_per_token(&config, &token_1, &token_1, &(share_1*2)) > share_1);
+    }
+
+    #[test]
+    fn round_date_test() {
+        assert_eq!(round_date(&1645740448), 1645660800)
+    }
+
+    #[test]
+    fn calculate_rewards_test() {
+        let token_decimals = 8;
+        let shares_decimals = 18;
+        let config = init_config(token_decimals, shares_decimals);
+
+        // No rewards
+        let (tokens, shares) = calculate_rewards(
+            &config,
+            100 * 10u128.pow(token_decimals.into()),
+            100 * 10u128.pow(shares_decimals.into()),
+            200 * 10u128.pow(token_decimals.into()),
+            200 * 10u128.pow(shares_decimals.into()),
+        );
+
+        assert_eq!(tokens, 0);
+        assert_eq!(shares, 0);
     }
 }

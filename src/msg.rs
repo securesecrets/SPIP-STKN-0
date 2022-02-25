@@ -87,7 +87,7 @@ pub enum HandleMsg {
         unbond_time: Option<u64>,
         disable_treasury: bool,
         treasury: Option<HumanAddr>,
-        padding: String
+        padding: Option<String>
     },
     Receive {
         sender: HumanAddr,
@@ -95,20 +95,20 @@ pub enum HandleMsg {
         amount: Uint128,
         msg: Option<Binary>,
         memo: Option<String>,
-        padding: String
+        padding: Option<String>
     },
     Unbond {
         amount: Uint128,
-        padding: String
+        padding: Option<String>
     },
     ClaimUnbond {
-        padding: String
+        padding: Option<String>
     },
     ClaimRewards {
-        padding: String
+        padding: Option<String>
     },
     StakeRewards {
-        padding: String
+        padding: Option<String>
     },
 
     // Balance
@@ -117,17 +117,17 @@ pub enum HandleMsg {
         code_hash: Option<String>,
         msg: Option<Binary>,
         memo: Option<String>,
-        padding: String
+        padding: Option<String>
     },
 
     // Distributors
     AddDistributors {
         distributors: Vec<HumanAddr>,
-        padding: String
+        padding: Option<String>
     },
     SetDistributors {
         distributors: Vec<HumanAddr>,
-        padding: String
+        padding: Option<String>
     },
 
     // Base ERC-20 stuff
@@ -365,6 +365,7 @@ pub enum HandleAnswer {
 pub enum QueryMsg {
     // Staking
     StakeConfig {},
+    // TODO: add current account balance and all that to the endpoints
     TotalStaked {},
     // Total token shares per token
     StakeRate {},

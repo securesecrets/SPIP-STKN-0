@@ -1794,6 +1794,7 @@ mod tests {
     use cosmwasm_std::testing::*;
     use cosmwasm_std::{from_binary, BlockInfo, ContractInfo, MessageInfo, QueryResponse, WasmMsg};
     use std::any::Any;
+    use shade_protocol::shd_staking::ReceiveType;
     use shade_protocol::utils::asset::Contract;
 
     // Helper functions
@@ -1963,15 +1964,15 @@ mod tests {
         let handle_result: HandleAnswer = from_binary(&handle_result.data.unwrap()).unwrap();
 
         match handle_result {
-            | HandleAnswer::UpdateStakeConfig { status: ResponseStatus }
-            | HandleAnswer::Receive { status: ResponseStatus }
-            | HandleAnswer::Unbond { status: ResponseStatus }
-            | HandleAnswer::ClaimUnbond { status: ResponseStatus }
-            | HandleAnswer::ClaimRewards { status: ResponseStatus }
-            | HandleAnswer::StakeRewards { status: ResponseStatus }
-            | HandleAnswer::ExposeBalance { status: ResponseStatus }
-            | HandleAnswer::AddDistributors { status: ResponseStatus }
-            | HandleAnswer::SetDistributors { status: ResponseStatus }
+            | HandleAnswer::UpdateStakeConfig { status }
+            | HandleAnswer::Receive { status }
+            | HandleAnswer::Unbond { status }
+            | HandleAnswer::ClaimUnbond { status }
+            | HandleAnswer::ClaimRewards { status }
+            | HandleAnswer::StakeRewards { status }
+            | HandleAnswer::ExposeBalance { status }
+            | HandleAnswer::AddDistributors { status }
+            | HandleAnswer::SetDistributors { status }
             | HandleAnswer::Transfer { status }
             | HandleAnswer::Send { status }
             | HandleAnswer::Burn { status }
@@ -2056,7 +2057,7 @@ mod tests {
     fn test_total_supply_overflow() {
         let (init_result, _deps) = init_helper(vec![InitialBalance {
             address: HumanAddr("lebron".to_string()),
-            amount: Uint128(u128::max_value()),
+            amount: Uint128(u128::MAX),
         }]);
         assert!(
             init_result.is_ok(),
@@ -2067,7 +2068,7 @@ mod tests {
         let (init_result, _deps) = init_helper(vec![
             InitialBalance {
                 address: HumanAddr("lebron".to_string()),
-                amount: Uint128(u128::max_value()),
+                amount: Uint128(u128::MAX),
             },
             InitialBalance {
                 address: HumanAddr("giannis".to_string()),
@@ -2082,10 +2083,190 @@ mod tests {
     }
 
     // Handle tests
-    // TODO: test update stake config
-    // TODO: test receive
+    #[test]
+    fn test_handle_update_stake_config() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        let handle_msg = HandleMsg::UpdateStakeConfig {
+            unbond_time: Some(100),
+            disable_treasury: true,
+            treasury: None,
+            padding: None,
+        };
+        // Check that only admins can interact
+        let handle_result = handle(&mut deps, mock_env("not_admin", &[]), handle_msg.clone());
+        assert!(handle_result.is_err());
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg);
+        assert!(handle_result.is_ok());
+
+        let query_balance_msg = QueryMsg::StakeConfig {};
+
+        let query_response = query(&deps, query_balance_msg).unwrap();
+        let config = match from_binary(&query_response).unwrap() {
+            QueryAnswer::StakedConfig { config } => config,
+            _ => panic!("Unexpected result from query"),
+        };
+
+        assert_eq!(config.treasury, None);
+        assert_eq!(config.unbond_time, 100);
+        assert_eq!(config.decimal_difference, 10);
+    }
+
+    fn new_staked_account(
+        deps: &mut Extern<MockStorage, MockApi, MockQuerier>,
+        acc: &str,
+        pwd: &str,
+        stake: Uint128
+    ) {
+        let handle_msg = HandleMsg::Receive {
+            sender: HumanAddr(acc.to_string()),
+            from: Default::default(),
+            amount: stake,
+            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            memo: None,
+            padding: None,
+        };
+        // Bond tokens
+        let handle_result = handle(
+            deps,
+            mock_env("token", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+        let handle_msg = HandleMsg::SetViewingKey {
+            key: pwd.to_string(),
+            padding: None,
+        };
+        let handle_result = handle(
+            deps,
+            mock_env(acc, &[]),
+            handle_msg.clone()
+        );
+    }
+
+    fn check_staked_state(
+        deps: & Extern<MockStorage, MockApi, MockQuerier>,
+        expected_tokens: Uint128,
+        expected_shares: Uint128
+    ) {
+        let query_balance_msg = QueryMsg::TotalStaked {};
+
+        let query_response = query(&deps, query_balance_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::TotalStaked { shares, tokens } => {
+                assert_eq!(tokens, expected_tokens);
+                assert_eq!(shares, expected_shares)
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+    }
+
+    #[test]
+    fn test_handle_receive_bonding() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        let handle_msg = HandleMsg::Receive {
+            sender: HumanAddr("foo".to_string()),
+            from: Default::default(),
+            amount: Uint128(100 * 10u128.pow(8)),
+            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            memo: None,
+            padding: None,
+        };
+        // Bond tokens with unsupported token
+        let handle_result = handle(
+            &mut deps,
+            mock_env("not_token", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_err());
+        // Bond tokens
+        let handle_result = handle(
+            &mut deps,
+            mock_env("token", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+        let handle_msg = HandleMsg::SetViewingKey {
+            key: "key".to_string(),
+            padding: None,
+        };
+        // Bond tokens with unsupported token
+        let handle_result = handle(
+            &mut deps,
+            mock_env("foo", &[]),
+            handle_msg.clone()
+        );
+
+        check_staked_state(
+            &deps,
+            Uint128(100 * 10u128.pow(8)),
+            Uint128(100 * 10u128.pow(18))
+        );
+
+        new_staked_account(&mut deps, "bar", "key", Uint128(100 * 10u128.pow(8)));
+        // Query user stake
+        let query_balance_msg = QueryMsg::Staked {
+            address: HumanAddr("bar".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_balance_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
+                assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128::zero());
+                assert_eq!(unbonding, Uint128::zero());
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+        check_staked_state(
+            &deps,
+            Uint128(200 * 10u128.pow(8)),
+            Uint128(200 * 10u128.pow(18))
+        );
+    }
+
     // TODO: test unbond
+    fn test_handle_unbond() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        new_staked_account(&mut deps, "foo", "key", Uint128(100 * 10u128.pow(8)));
+
+        // Unbond more than allowed
+        let handle_msg = HandleMsg::Unbond {
+            amount: Uint128(1000 * 10u128.pow(8)),
+            padding: None
+        };
+        let handle_result = handle(
+            &mut deps,
+            mock_env("foo", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_err());
+
+        // Unbond
+        let handle_msg = HandleMsg::Unbond {
+            amount: Uint128(50 * 10u128.pow(8)),
+            padding: None
+        };
+        let handle_result = handle(
+            &mut deps,
+            mock_env("foo", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+
+    }
+
+    // TODO: test fund unbond
     // TODO: test claim unbond
+    // TODO: test fund rewards
     // TODO: test claim rewards
     // TODO: test stake rewards
     // TODO: test add distributors

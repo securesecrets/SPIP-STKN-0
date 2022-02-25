@@ -50,5 +50,8 @@ shade-protocol = { git = "https://github.com/securesecrets/shade", branch = "sta
 # Needed for staking
 binary-heap-plus = { version = "0.4.1", features = ["serde"] }
 
+# Large number math
+ethnum = "1.1.1"
+
 [dev-dependencies]
 cosmwasm-schema = { version = "0.9.2" }
