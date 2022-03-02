@@ -1,10 +1,11 @@
+use std::collections::BinaryHeap;
 use cosmwasm_std::{Api, Binary, Extern, HumanAddr, Querier, StdResult, Storage, to_binary, Uint128};
 use shade_protocol::shd_staking::stake::StakeConfig;
 use shade_protocol::storage::{BucketStorage, SingletonStorage};
 use crate::msg::QueryAnswer;
 use crate::stake::{calculate_rewards, shares_per_token};
 use crate::state::{ReadonlyBalances};
-use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, UnbondingQueue, UserShares};
+use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, TotalUnbonding, UnbondingQueue, UserShares};
 
 pub fn stake_config<S: Storage, A: Api, Q: Querier>(
     deps: &Extern<S, A, Q>,
@@ -37,30 +38,41 @@ pub fn stake_rate<S: Storage, A: Api, Q: Querier>(
     })
 }
 
-pub fn unbonding<S: Storage, A: Api, Q: Querier>(
+pub fn unfunded<S: Storage, A: Api, Q: Querier>(
     deps: &Extern<S, A, Q>,
     start: u64,
-    end: u64
+    total: u64
 ) -> StdResult<Binary> {
 
-    let mut total = Uint128::zero();
+    let mut total_bonded = Uint128::zero();
 
     let mut queue = DailyUnbondingQueue::load(&deps.storage)?.0;
 
+    let mut count = 0;
     while !queue.is_empty() {
         let item = queue.pop().unwrap();
-        if item.release > start {
-            if item.release > end {
+        if item.release >= start {
+            if count >= total {
                 break
             }
-            total += Uint128(item.unbonding);
+            total_bonded += (item.unbonding - item.funded)?;
+            count += 1;
         }
     }
 
-    to_binary(&QueryAnswer::Unbonding {
-        total
+    to_binary(&QueryAnswer::Unfunded {
+        total: total_bonded
     })
 }
+
+pub fn unbonding<S: Storage, A: Api, Q: Querier>(
+    deps: &Extern<S, A, Q>,
+) -> StdResult<Binary> {
+    to_binary(&QueryAnswer::Unbonding {
+        total: TotalUnbonding::load(&deps.storage)?.0
+    })
+}
+
 pub fn staked<S: Storage, A: Api, Q: Querier>(
     deps: &Extern<S, A, Q>,
     account: HumanAddr,
@@ -84,10 +96,10 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
         TotalShares::load(&deps.storage)?.0.u128()
     );
 
-    let mut queue = UnbondingQueue::load(
+    let mut queue = UnbondingQueue::may_load(
         &deps.storage,
         account.as_str().as_bytes()
-    )?.0;
+    )?.unwrap_or(UnbondingQueue(BinaryHeap::new())).0;
 
     let mut unbonding = Uint128::zero();
     let mut unbonded = Uint128::zero();

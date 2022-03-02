@@ -48,15 +48,6 @@ impl SingletonStorage for TotalUnbonding {
     const NAMESPACE: &'static [u8] = b"total_unbonding";
 }
 
-// used to check if unbonding id funded
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct UnbondingIsFunded(pub Uint128);
-
-impl SingletonStorage for UnbondingIsFunded {
-    const NAMESPACE: &'static [u8] = b"unbonding_is_funded";
-}
-
 // Distributors wrappers
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

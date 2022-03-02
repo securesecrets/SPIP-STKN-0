@@ -365,13 +365,13 @@ pub enum HandleAnswer {
 pub enum QueryMsg {
     // Staking
     StakeConfig {},
-    // TODO: add current account balance and all that to the endpoints
     TotalStaked {},
     // Total token shares per token
     StakeRate {},
-    Unbonding {
+    Unbonding {},
+    Unfunded {
         start: u64,
-        end: u64
+        total: u64
     },
     Staked {
         address: HumanAddr,
@@ -465,6 +465,7 @@ pub enum QueryAnswer {
     StakedConfig {
         config: StakeConfig,
     },
+    // TODO: Use airdrop's query rounding
     TotalStaked {
         tokens: Uint128,
         shares: Uint128
@@ -480,7 +481,11 @@ pub enum QueryAnswer {
         unbonding: Uint128,
         unbonded: Option<Uint128>
     },
+    // TODO: Use airdrop's query rounding on the recent days
     Unbonding {
+        total: Uint128
+    },
+    Unfunded {
         total: Uint128
     },
 

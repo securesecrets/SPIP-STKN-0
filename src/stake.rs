@@ -1,5 +1,5 @@
 use std::collections::BinaryHeap;
-use cosmwasm_std::{Api, Binary, CanonicalAddr, Decimal, Env, Extern, from_binary, HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, to_binary, Uint128};
+use cosmwasm_std::{Api, Binary, CanonicalAddr, debug_print, Decimal, Env, Extern, from_binary, HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, to_binary, Uint128};
 use ethnum::u256;
 use secret_toolkit::snip20::{register_receive_msg, send_msg};
 use shade_protocol::shd_staking::ReceiveType;
@@ -9,7 +9,7 @@ use shade_protocol::utils::asset::Contract;
 use crate::contract::{check_if_admin, try_mint_impl};
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
-use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, UnbondingQueue, UnsentStakedTokens, UserShares};
+use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, TotalUnbonding, UnbondingQueue, UnsentStakedTokens, UserShares};
 use crate::state::{Balances, Config, Constants, ReadonlyConfig};
 use crate::transaction_history::{store_add_reward, store_claim_reward, store_claim_unbond, store_fund_unbond, store_stake, store_unbond};
 
@@ -66,7 +66,7 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
 ///
 /// Rounds down a date to the nearest day
 ///
-fn round_date(date: &u64) -> u64 {
+fn round_date(date: u64) -> u64 {
     let day = 86400; //60 * 60 * 24
     date - (date % day)
 }
@@ -387,15 +387,17 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
         }
 
         ReceiveType::Unbond => {
-            let mut remaining_amount = amount.u128();
+            let mut remaining_amount = amount;
 
             let mut daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?;
 
             while !daily_unbond_queue.0.is_empty() {
                 let mut unbond = daily_unbond_queue.0.pop().unwrap();
                 remaining_amount = unbond.fund(remaining_amount);
-                if unbond.is_funded() {
-                    daily_unbond_queue.0.push(unbond);
+                if remaining_amount == Uint128::zero() {
+                    if !unbond.is_funded() {
+                        daily_unbond_queue.0.push(unbond);
+                    }
                     break
                 }
             }
@@ -403,10 +405,10 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
             daily_unbond_queue.save(&mut deps.storage)?;
 
             // Send back if overfunded
-            if remaining_amount > 0 {
+            if remaining_amount > Uint128::zero() {
                 messages.push(send_msg(
                     sender,
-                    Uint128(remaining_amount),
+                    remaining_amount.clone(),
                     None,
                     None,
                     None,
@@ -419,7 +421,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
             store_fund_unbond(
                 &mut deps.storage,
                 &sender_canon,
-                (amount - Uint128(remaining_amount))?,
+                (amount - remaining_amount)?,
                 symbol,
                 None,
                 &env.block
@@ -445,25 +447,31 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
 
     let stake_config = StakeConfig::load(&deps.storage)?;
 
+    // Subtract tokens from user balance
+    remove_balance(&mut deps.storage, &stake_config, &sender, &sender_canon, amount.u128())?;
+
+    let mut totalUnbonding = TotalUnbonding::load(&mut deps.storage)?;
+    totalUnbonding.0 += amount;
+    totalUnbonding.save(&mut deps.storage)?;
+
     // Round to that day's public unbonding queue, initialize one if empty
-    let mut daily_unbond_queue = DailyUnbondingQueue::may_load(
-        &deps.storage)?.unwrap_or(DailyUnbondingQueue(BinaryHeap::new()));
+    let mut daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?;
 
     let mut daily_unbond_arr = daily_unbond_queue.0.clone().into_vec();
 
-    // Look for the day of unbondin, if not found then create one
+    // Look for the day of unbonding, if not found then create one
     let mut item_found = false;
-    let day = round_date(&env.block.time);
+    let day = round_date(&env.block.time + &stake_config.unbond_time);
     for item in daily_unbond_arr.iter_mut() {
         if item.release == day {
-            item.unbonding += amount.u128();
+            item.unbonding += amount;
             item_found = true;
             daily_unbond_queue = DailyUnbondingQueue(BinaryHeap::from(daily_unbond_arr));
             break
         }
     }
     if !item_found {
-        daily_unbond_queue.0.push(DailyUnbonding::new(amount.u128(), day));
+        daily_unbond_queue.0.push(DailyUnbonding::new(amount, day));
     }
 
     daily_unbond_queue.save(&mut deps.storage)?;
@@ -477,9 +485,6 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     unbond_queue.0.push(Unbonding { amount, release: &env.block.time + stake_config.unbond_time });
 
     unbond_queue.save(&mut deps.storage, sender.to_string().as_bytes())?;
-
-    // Subtract tokens from user balance
-    remove_balance(&mut deps.storage, &stake_config, &sender, &sender_canon, amount.u128())?;
 
     // Store the tx
     let symbol = ReadonlyConfig::from_storage(&deps.storage).constants()?.symbol;
@@ -508,6 +513,9 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
 
     let stake_config = StakeConfig::load(&deps.storage)?;
 
+    let mut totalUnbonding = TotalUnbonding::load(&mut deps.storage)?;
+
+    // Instead of iterating over it we just look at its smallest value (first in queue)
     let daily_unbond_queue = DailyUnbondingQueue::load(
         &deps.storage)?.0;
 
@@ -517,15 +525,35 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
         .expect("No unbonding queue found");
 
     let mut total = Uint128::zero();
-    while !unbond_queue.0.is_empty() && &unbond_queue.0.peek().unwrap().release < &env.block.time {
+    // Iterate over the sorted queue
+    while !unbond_queue.0.is_empty() {
         let unbond = unbond_queue.0.peek().unwrap();
-        if daily_unbond_queue.iter().any(|e| e.release == unbond.release && e.is_funded()) {
-            total += unbond.amount;
-            unbond_queue.0.pop();
+        // Since the queue is sorted, the moment we find a date above the current then we assume
+        // that no other item in the queue is eligible
+        if unbond.release <= env.block.time {
+            // Daily unbond queue is also sorted, therefore as long as its next item is greater
+            // than the unbond then we assume its funded
+            if daily_unbond_queue.is_empty() ||
+                round_date(unbond.release) < daily_unbond_queue.peek().unwrap().release {
+                total += unbond.amount;
+                unbond_queue.0.pop();
+            }
+            else {
+                break
+            }
+        }
+        else {
+            break
         }
     }
 
+    if total == Uint128::zero() {
+        return Err(StdError::generic_err("Nothing to claim"))
+    }
+
     unbond_queue.save(&mut deps.storage, sender.as_str().as_bytes())?;
+    totalUnbonding.0 = (totalUnbonding.0 - total)?;
+    totalUnbonding.save(&mut deps.storage)?;
 
     let symbol = ReadonlyConfig::from_storage(&deps.storage).constants()?.symbol;
     store_claim_unbond(
@@ -732,7 +760,7 @@ mod tests {
 
     #[test]
     fn round_date_test() {
-        assert_eq!(round_date(&1645740448), 1645660800)
+        assert_eq!(round_date(1645740448), 1645660800)
     }
 
     #[test]
