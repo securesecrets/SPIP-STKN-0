@@ -135,6 +135,7 @@ fn subtract_internal_supply<S: Storage>(
     shares: u128,
     total_tokens: &mut TotalTokens,
     tokens: u128,
+    remove_supply: bool
 ) -> StdResult<()> {
     // Update total shares
     if let Some(total) = total_shares.0.u128().checked_sub(shares) {
@@ -149,14 +150,16 @@ fn subtract_internal_supply<S: Storage>(
         TotalTokens(Uint128(total)).save(storage)?;
     }
     else {
-        return Err(StdError::generic_err("Insufficient shares"))
+        return Err(StdError::generic_err("Insufficient tokens"))
     }
-    let supply = ReadonlyConfig::from_storage(storage).total_supply();
-    if let Some(total) = supply.checked_sub(tokens) {
-        Config::from_storage(storage).set_total_supply(total);
-    }
-    else {
-        return Err(StdError::generic_err("Insufficient shares"))
+    if remove_supply {
+        let supply = ReadonlyConfig::from_storage(storage).total_supply();
+        if let Some(total) = supply.checked_sub(tokens) {
+            Config::from_storage(storage).set_total_supply(total);
+        }
+        else {
+            return Err(StdError::generic_err("Insufficient shares"))
+        }
     }
 
     Ok(())
@@ -201,7 +204,8 @@ fn remove_balance<S: Storage>(
         &mut total_shares,
         shares,
         &mut total_tokens,
-        amount
+        amount,
+        true
     )?;
 
     let mut balances = Balances::from_storage(storage);
@@ -232,9 +236,11 @@ fn claim_rewards<S: Storage>(
     let mut total_shares = TotalShares::load(storage)?;
     let mut total_tokens = TotalTokens::load(storage)?;
 
-    let (reward_shares, reward_token) = calculate_rewards(
+    let (reward_token, reward_shares) = calculate_rewards(
         stake_config, user_balance, user_shares.0.u128(),
         total_tokens.0.u128(), total_shares.0.u128());
+    println!("{}", reward_token);
+    println!("{}", total_tokens.0);
 
     if let Some(user_shares) = user_shares.0.u128().checked_sub(reward_shares) {
         UserShares(Uint128(user_shares)).save(storage, sender.as_str().as_bytes())?;
@@ -248,7 +254,8 @@ fn claim_rewards<S: Storage>(
         &mut total_shares,
         reward_shares,
         &mut total_tokens,
-        reward_token
+        reward_token,
+        false
     )?;
 
     Ok(reward_token)
@@ -436,6 +443,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
     })
 }
 
+//TODO: claim rewards before unbonding
 pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
@@ -769,16 +777,148 @@ mod tests {
         let shares_decimals = 18;
         let config = init_config(token_decimals, shares_decimals);
 
+        // Tester has 100 tokens
+        // Other user has 50
+
+        let u_t = 100 * 10u128.pow(token_decimals.into());
+        let mut u_s= 100 * 10u128.pow(shares_decimals.into());
+        let mut t_t = 150 * 10u128.pow(token_decimals.into());
+        let mut t_s = 150 * 10u128.pow(shares_decimals.into());
+
         // No rewards
         let (tokens, shares) = calculate_rewards(
             &config,
-            100 * 10u128.pow(token_decimals.into()),
-            100 * 10u128.pow(shares_decimals.into()),
-            200 * 10u128.pow(token_decimals.into()),
-            200 * 10u128.pow(shares_decimals.into()),
+            u_t,
+            u_s,
+            t_t,
+            t_s,
         );
 
         assert_eq!(tokens, 0);
         assert_eq!(shares, 0);
+
+        // Some rewards
+        // We add 300 tokens, tester should get 200 tokens
+        let reward = 300 * 10u128.pow(token_decimals.into());
+        t_t += reward;
+        let (tokens, shares) = calculate_rewards(
+            &config,
+            u_t,
+            u_s,
+            t_t,
+            t_s,
+        );
+
+        assert_eq!(tokens, reward * 2 / 3);
+        t_t = t_t - tokens;
+        // We should receive 2/3 of current shares
+        assert_eq!(shares, u_s * 2 / 3);
+        u_s = u_s - shares;
+        t_s = t_s - shares;
+
+        // After claiming
+        let (tokens, shares) = calculate_rewards(
+            &config,
+            u_t,
+            u_s,
+            t_t,
+            t_s,
+        );
+
+        assert_eq!(tokens, 0);
+        assert_eq!(shares, 0);
+    }
+
+    use rand::Rng;
+
+    #[test]
+    fn staking_simulation() {
+        let token_decimals = 8;
+        let shares_decimals = 18;
+        let config = init_config(token_decimals, shares_decimals);
+
+        let mut t_t = 0;
+        let mut t_s = 0;
+        let mut rand = rand::thread_rng();
+
+        let mut stakers = vec![];
+
+        for _ in 0..10 {
+            // Generate stakers in this round
+            for _ in 0..rand.gen_range(1..=4) {
+                let tokens = rand.gen_range(
+                    1..100 * 10u128.pow(token_decimals.into()));
+
+                let shares = shares_per_token(
+                    &config, &tokens, &t_t, &t_s);
+
+                stakers.push((
+                    tokens,
+                    shares
+                ));
+
+                t_t += tokens;
+                t_s += shares;
+            }
+
+            // Add random rewards
+            t_t += rand.gen_range(1..t_t/2);
+
+            // Claim and unstake
+            for _ in 0..rand.gen_range(0..=stakers.len()/2) {
+                let (mut tokens, mut shares) = stakers.remove(rand.gen_range(0..stakers.len()));
+                let (r_tokens, r_shares) = calculate_rewards(
+                    &config,
+                    tokens,
+                    shares,
+                    t_t,
+                    t_s
+                );
+
+                t_t -= r_tokens;
+                t_s -= r_shares;
+                shares -= r_shares;
+
+                let (r_tokens, r_shares) = calculate_rewards(
+                    &config,
+                    tokens,
+                    shares,
+                    t_t,
+                    t_s
+                );
+                assert_eq!(r_tokens, 0);
+                assert_eq!(r_shares, 0);
+
+                // Unstake
+                t_t -= tokens;
+                t_s -= shares;
+            }
+
+            // Claim the rest
+            while !stakers.is_empty() {
+                let (mut tokens, mut shares) = stakers.pop().unwrap();
+                let (r_tokens, r_shares) = calculate_rewards(
+                    &config,
+                    tokens,
+                    shares,
+                    t_t,
+                    t_s
+                );
+
+                t_t -= r_tokens;
+                t_s -= r_shares;
+                shares -= r_shares;
+
+                let (r_tokens, r_shares) = calculate_rewards(
+                    &config,
+                    tokens,
+                    shares,
+                    t_t,
+                    t_s
+                );
+                assert_eq!(r_tokens, 0);
+                assert_eq!(r_shares, 0);
+            }
+        }
     }
 }

@@ -2358,8 +2358,108 @@ mod staking_tests {
         assert!(handle_result.is_err());
     }
 
-    // TODO: test fund rewards
-    // TODO: test claim rewards
+    #[test]
+    fn test_handle_fund_and_claim_rewards() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        // Foo should get 2x more rewards than bar
+        new_staked_account(&mut deps, "foo", "key", Uint128(100 * 10u128.pow(8)));
+        new_staked_account(&mut deps, "bar", "key", Uint128(50 * 10u128.pow(8)));
+
+        // Add rewards; foo should get 50 tkn and bar 25
+        let handle_msg = HandleMsg::Receive {
+            sender: HumanAddr("treasury".to_string()),
+            from: Default::default(),
+            amount: Uint128(75 * 10u128.pow(8)),
+            msg: Some(to_binary(&ReceiveType::Reward).unwrap()),
+            memo: None,
+            padding: None,
+        };
+        let handle_result = handle(
+            &mut deps,
+            mock_env("token", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        // Query user stake
+        let query_msg = QueryMsg::Staked {
+            address: HumanAddr("foo".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
+                assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128(50 * 10u128.pow(8)));
+                assert_eq!(unbonding, Uint128::zero());
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+
+        // Query user stake
+        let query_msg = QueryMsg::Staked {
+            address: HumanAddr("bar".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(50 * 10u128.pow(8)));
+                assert_eq!(shares, Uint128(50 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128(25 * 10u128.pow(8)));
+                assert_eq!(unbonding, Uint128::zero());
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+
+        // Total tokens should be total staked plus the rewards
+        check_staked_state(
+            &deps,
+            Uint128(225 * 10u128.pow(8)),
+            Uint128(150 * 10u128.pow(18))
+        );
+
+        // Claim rewards
+        let handle_msg = HandleMsg::ClaimRewards { padding: None };
+
+        let handle_result = handle(
+            &mut deps,
+            mock_env("foo", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        let query_msg = QueryMsg::Staked {
+            address: HumanAddr("foo".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
+                assert!(shares < Uint128(100 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128::zero());
+                assert_eq!(unbonding, Uint128::zero());
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+
+    }
+
     // TODO: test stake rewards
     // TODO: test add distributors
     // TODO: test set distributors
