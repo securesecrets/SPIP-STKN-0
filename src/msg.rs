@@ -17,8 +17,6 @@ pub struct InitialBalance {
     pub amount: Uint128,
 }
 
-//TODO: remove references to deposit and redeem
-
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InitMsg {
     pub name: String,
@@ -465,7 +463,6 @@ pub enum QueryAnswer {
     StakedConfig {
         config: StakeConfig,
     },
-    // TODO: Use airdrop's query rounding
     TotalStaked {
         tokens: Uint128,
         shares: Uint128
@@ -481,7 +478,6 @@ pub enum QueryAnswer {
         unbonding: Uint128,
         unbonded: Option<Uint128>
     },
-    // TODO: Use airdrop's query rounding on the recent days
     Unbonding {
         total: Uint128
     },

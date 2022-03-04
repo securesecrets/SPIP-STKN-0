@@ -221,7 +221,7 @@ fn remove_balance<S: Storage>(
     Ok(())
 }
 
-fn claim_rewards<S: Storage>(
+pub fn claim_rewards<S: Storage>(
     storage: &mut S,
     stake_config: &StakeConfig,
     sender: &HumanAddr,
@@ -239,8 +239,10 @@ fn claim_rewards<S: Storage>(
     let (reward_token, reward_shares) = calculate_rewards(
         stake_config, user_balance, user_shares.0.u128(),
         total_tokens.0.u128(), total_shares.0.u128());
-    println!("{}", reward_token);
-    println!("{}", total_tokens.0);
+
+    if reward_token == 0 {
+        return Ok(reward_token)
+    }
 
     if let Some(user_shares) = user_shares.0.u128().checked_sub(reward_shares) {
         UserShares(Uint128(user_shares)).save(storage, sender.as_str().as_bytes())?;
@@ -443,7 +445,6 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
     })
 }
 
-//TODO: claim rewards before unbonding
 pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
@@ -454,6 +455,9 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     let sender_canon = deps.api.canonical_address(&sender)?;
 
     let stake_config = StakeConfig::load(&deps.storage)?;
+
+    // Try to claim before unbonding
+    let claim = claim_rewards(&mut deps.storage, &stake_config, &sender, &sender_canon)?;
 
     // Subtract tokens from user balance
     remove_balance(&mut deps.storage, &stake_config, &sender, &sender_canon, amount.u128())?;
@@ -496,6 +500,30 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
 
     // Store the tx
     let symbol = ReadonlyConfig::from_storage(&deps.storage).constants()?.symbol;
+    let mut messages = vec![];
+    if claim != 0 {
+        messages.push(
+            send_msg(
+                sender.clone(),
+                Uint128(claim),
+                None,
+                None,
+                None,
+                256,
+                stake_config.staked_token.code_hash,
+                stake_config.staked_token.address
+            )?
+        );
+
+        store_claim_reward(
+            &mut deps.storage,
+            &sender_canon,
+            Uint128(claim),
+            symbol.clone(),
+            None,
+            &env.block
+        )?;
+    }
     store_unbond(
         &mut deps.storage,
         &deps.api.canonical_address(&sender)?,
@@ -506,7 +534,7 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     )?;
 
     Ok(HandleResponse {
-        messages: vec![],
+        messages,
         log: vec![],
         data: Some(to_binary(&HandleAnswer::Unbond { status: Success })?),
     })
@@ -601,6 +629,10 @@ pub fn try_claim_rewards<S: Storage, A: Api, Q: Querier>(
     let sender_canon = &deps.api.canonical_address(sender)?;
 
     let claim = claim_rewards(&mut deps.storage, &stake_config, sender, sender_canon)?;
+
+    if claim == 0 {
+        return Err(StdError::generic_err("Nothing to claim"))
+    }
 
     let messages = vec![
         send_msg(

@@ -16,18 +16,16 @@ use crate::msg::{
 use crate::rand::sha_256;
 use crate::receiver::Snip20ReceiveMsg;
 use crate::state::{get_receiver_hash, read_allowance, read_viewing_key, set_receiver_hash, write_allowance, write_viewing_key, Balances, Config, Constants, ReadonlyBalances, ReadonlyConfig};
-use crate::transaction_history::{
-    get_transfers, get_txs, store_burn, store_mint, store_transfer,
-};
+use crate::transaction_history::{get_transfers, get_txs, store_burn, store_claim_reward, store_mint, store_transfer};
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
-use secret_toolkit::snip20::{register_receive_msg, token_info_query};
+use secret_toolkit::snip20::{register_receive_msg, send_msg, token_info_query};
 use shade_protocol::shd_staking::stake::{StakeConfig};
 use crate::state_staking::{DailyUnbondingQueue, Distributors, DistributorsEnabled, TotalShares, TotalTokens, TotalUnbonding, UnsentStakedTokens};
 use shade_protocol::storage::SingletonStorage;
 use crate::distributors::{get_distributor, try_add_distributors, try_set_distributors};
 use crate::expose_balance::try_expose_balance;
-use crate::stake::{try_claim_rewards, try_claim_unbond, try_receive, try_stake_rewards, try_unbond, try_update_stake_config};
+use crate::stake::{claim_rewards, try_claim_rewards, try_claim_unbond, try_receive, try_stake_rewards, try_unbond, try_update_stake_config};
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -166,8 +164,6 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         log: vec![]
     })
 }
-
-// TODO: if user can send tokens, force claiming and reduce shares to avoid issues
 
 fn pad_response(response: StdResult<HandleResponse>) -> StdResult<HandleResponse> {
     response.map(|mut response| {
@@ -813,6 +809,7 @@ pub fn query_allowance<S: Storage, A: Api, Q: Querier>(
 
 fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
+    messages: &mut Vec<CosmosMsg>,
     sender: &HumanAddr,
     sender_canon: &CanonicalAddr,
     recipient: &HumanAddr,
@@ -830,9 +827,35 @@ fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
         }
     }
 
-    perform_transfer(&mut deps.storage, &sender_canon, &recipient_canon, amount.u128())?;
-
     let symbol = Config::from_storage(&mut deps.storage).constants()?.symbol;
+
+    let stake_config = StakeConfig::load(&deps.storage)?;
+    let claim = claim_rewards(&mut deps.storage, &stake_config, sender, sender_canon)?;
+    if claim != 0 {
+        messages.push(
+            send_msg(
+                sender.clone(),
+                Uint128(claim),
+                None,
+                None,
+                None,
+                256,
+                stake_config.staked_token.code_hash,
+                stake_config.staked_token.address
+            )?
+        );
+
+        store_claim_reward(
+            &mut deps.storage,
+            sender_canon,
+            Uint128(claim),
+            symbol.clone(),
+            None,
+            block
+        )?;
+    }
+
+    perform_transfer(&mut deps.storage, &sender_canon, &recipient_canon, amount.u128())?;
 
     store_transfer(
         &mut deps.storage,
@@ -861,8 +884,11 @@ fn try_transfer<S: Storage, A: Api, Q: Querier>(
 
     let distributor = get_distributor(&deps)?;
 
+    let mut messages = vec![];
+
     try_transfer_impl(
         deps,
+        &mut messages,
         &sender,
         &sender_canon,
         &recipient,
@@ -874,7 +900,7 @@ fn try_transfer<S: Storage, A: Api, Q: Querier>(
     )?;
 
     let res = HandleResponse {
-        messages: vec![],
+        messages,
         log: vec![],
         data: Some(to_binary(&HandleAnswer::Transfer { status: Success })?),
     };
@@ -891,11 +917,14 @@ fn try_batch_transfer<S: Storage, A: Api, Q: Querier>(
 
     let distributor = get_distributor(&deps)?;
 
+    let mut messages = vec![];
+
     for action in actions {
         let recipient = action.recipient;
         let recipient_canon = deps.api.canonical_address(&recipient)?;
         try_transfer_impl(
             deps,
+            &mut messages,
             &sender,
             &sender_canon,
             &recipient,
@@ -908,7 +937,7 @@ fn try_batch_transfer<S: Storage, A: Api, Q: Querier>(
     }
 
     let res = HandleResponse {
-        messages: vec![],
+        messages,
         log: vec![],
         data: Some(to_binary(&HandleAnswer::BatchTransfer { status: Success })?),
     };
@@ -964,6 +993,7 @@ fn try_send_impl<S: Storage, A: Api, Q: Querier>(
     let recipient_canon = deps.api.canonical_address(&recipient)?;
     try_transfer_impl(
         deps,
+        messages,
         &sender,
         &sender_canon,
         &recipient,
@@ -1713,6 +1743,7 @@ fn perform_transfer<T: Storage>(
     to: &CanonicalAddr,
     amount: u128,
 ) -> StdResult<()> {
+    // TODO: also add share transfer
     let mut balances = Balances::from_storage(store);
 
     let mut from_balance = balances.balance(from);
@@ -2457,12 +2488,235 @@ mod staking_tests {
             },
             _ => panic!("Unexpected result from query"),
         };
-
     }
 
-    // TODO: test stake rewards
-    // TODO: test add distributors
-    // TODO: test set distributors
+    #[test]
+    fn test_handle_stake_rewards() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        new_staked_account(&mut deps, "foo", "key", Uint128(100 * 10u128.pow(8)));
+
+        // Add rewards
+        let handle_msg = HandleMsg::Receive {
+            sender: HumanAddr("treasury".to_string()),
+            from: Default::default(),
+            amount: Uint128(50 * 10u128.pow(8)),
+            msg: Some(to_binary(&ReceiveType::Reward).unwrap()),
+            memo: None,
+            padding: None,
+        };
+        let handle_result = handle(
+            &mut deps,
+            mock_env("token", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        // Check account to confirm it works
+        let query_msg = QueryMsg::Staked {
+            address: HumanAddr("foo".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
+                assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128(50 * 10u128.pow(8)));
+                assert_eq!(unbonding, Uint128::zero());
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+
+        let handle_msg = HandleMsg::StakeRewards {padding: None};
+        let handle_result = handle(
+            &mut deps,
+            mock_env("foo", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        let query_msg = QueryMsg::Staked {
+            address: HumanAddr("foo".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(150 * 10u128.pow(8)));
+                assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128::zero());
+                assert_eq!(unbonding, Uint128::zero());
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+    }
+
+    #[test]
+    fn test_handle_unstake_claim() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        new_staked_account(&mut deps, "foo", "key", Uint128(100 * 10u128.pow(8)));
+
+        // Add rewards
+        let handle_msg = HandleMsg::Receive {
+            sender: HumanAddr("treasury".to_string()),
+            from: Default::default(),
+            amount: Uint128(50 * 10u128.pow(8)),
+            msg: Some(to_binary(&ReceiveType::Reward).unwrap()),
+            memo: None,
+            padding: None,
+        };
+        let handle_result = handle(
+            &mut deps,
+            mock_env("token", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        // Check account to confirm it works
+        let query_msg = QueryMsg::Staked {
+            address: HumanAddr("foo".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
+                assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128(50 * 10u128.pow(8)));
+                assert_eq!(unbonding, Uint128::zero());
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+
+        // Unbond and confirm that it claimed
+        let handle_msg = HandleMsg::Unbond {
+            amount: Uint128(50 * 10u128.pow(8)),
+            padding: None
+        };
+        // Set time for ease of prediction
+        let mut env = mock_env("foo", &[]);
+        env.block.time = 10;
+        let handle_result = handle(
+            &mut deps,
+            env,
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        // Check account to confirm it works
+        let query_msg = QueryMsg::Staked {
+            address: HumanAddr("foo".to_string()),
+            key: "key".to_string(),
+            time: None
+        };
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Staked { tokens, shares, pending_rewards,
+                unbonding, unbonded } => {
+                assert_eq!(tokens, Uint128(50 * 10u128.pow(8)));
+                assert!(shares < Uint128(50 * 10u128.pow(18)));
+                assert_eq!(pending_rewards, Uint128::zero());
+                assert_eq!(unbonding, Uint128(50 * 10u128.pow(8)));
+                assert_eq!(unbonded, None);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+    }
+
+    #[test]
+    fn test_handle_add_distributors() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        let query_msg = QueryMsg::Distributors {};
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Distributors { distributors } => {
+                assert_eq!(distributors.len(), 1);
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+
+        let handle_msg = HandleMsg::AddDistributors {
+            distributors: vec![HumanAddr("new_distrib".to_string())],
+            padding: None,
+        };
+        let handle_result = handle(
+            &mut deps,
+            mock_env("not_admin", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_err());
+
+        let handle_result = handle(
+            &mut deps,
+            mock_env("admin", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        let query_msg = QueryMsg::Distributors {};
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Distributors { distributors } => {
+                assert_eq!(distributors.len(), 2);
+                assert_eq!(distributors[1], HumanAddr("new_distrib".to_string()));
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+    }
+
+    #[test]
+    fn test_handle_set_distributors() {
+        let (init_result, mut deps) = init_helper_staking();
+
+        let handle_msg = HandleMsg::SetDistributors {
+            distributors: vec![HumanAddr("new_distrib".to_string())],
+            padding: None,
+        };
+        let handle_result = handle(
+            &mut deps,
+            mock_env("not_admin", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_err());
+
+        let handle_result = handle(
+            &mut deps,
+            mock_env("admin", &[]),
+            handle_msg.clone()
+        );
+        assert!(handle_result.is_ok());
+
+        let query_msg = QueryMsg::Distributors {};
+
+        let query_response = query(&deps, query_msg).unwrap();
+        match from_binary(&query_response).unwrap() {
+            QueryAnswer::Distributors { distributors } => {
+                assert_eq!(distributors.len(), 1);
+                assert_eq!(distributors[0], HumanAddr("new_distrib".to_string()));
+            },
+            _ => panic!("Unexpected result from query"),
+        };
+    }
+    // TODO: send tokens to distributors
+    // TODO: claim rewards when doing these actions
 
 }
 
