@@ -1743,7 +1743,6 @@ fn perform_transfer<T: Storage>(
     to: &CanonicalAddr,
     amount: u128,
 ) -> StdResult<()> {
-    // TODO: also add share transfer
     let mut balances = Balances::from_storage(store);
 
     let mut from_balance = balances.balance(from);
@@ -1762,6 +1761,10 @@ fn perform_transfer<T: Storage>(
         StdError::generic_err("This tx will literally make them too rich. Try transferring less")
     })?;
     balances.set_account_balance(to, to_balance);
+
+    // Transfer shares
+    // calculate shares per token
+    // move shares from one user to another
 
     Ok(())
 }
