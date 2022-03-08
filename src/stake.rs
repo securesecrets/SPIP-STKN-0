@@ -3,7 +3,7 @@ use cosmwasm_std::{Api, Binary, CanonicalAddr, debug_print, Decimal, Env, Extern
 use ethnum::u256;
 use secret_toolkit::snip20::{register_receive_msg, send_msg};
 use shade_protocol::shd_staking::ReceiveType;
-use shade_protocol::shd_staking::stake::{DailyUnbonding, StakeConfig, Unbonding};
+use shade_protocol::shd_staking::stake::{DailyUnbonding, StakeConfig, Unbonding, VecQueue};
 use shade_protocol::storage::{BucketStorage, SingletonStorage};
 use shade_protocol::utils::asset::Contract;
 use crate::contract::{check_if_admin, try_mint_impl};
@@ -400,13 +400,12 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
 
             let mut daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?;
 
-            while !daily_unbond_queue.0.is_empty() {
-                let mut unbond = daily_unbond_queue.0.pop().unwrap();
-                remaining_amount = unbond.fund(remaining_amount);
+            while !daily_unbond_queue.0.0.is_empty() {
+                remaining_amount = daily_unbond_queue.0.0[0].fund(remaining_amount);
+                if daily_unbond_queue.0.0[0].is_funded() {
+                    daily_unbond_queue.0.0.pop();
+                }
                 if remaining_amount == Uint128::zero() {
-                    if !unbond.is_funded() {
-                        daily_unbond_queue.0.push(unbond);
-                    }
                     break
                 }
             }
@@ -468,33 +467,22 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
 
     // Round to that day's public unbonding queue, initialize one if empty
     let mut daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?;
-
-    let mut daily_unbond_arr = daily_unbond_queue.0.clone().into_vec();
-
-    // Look for the day of unbonding, if not found then create one
-    let mut item_found = false;
-    let day = round_date(&env.block.time + &stake_config.unbond_time);
-    for item in daily_unbond_arr.iter_mut() {
-        if item.release == day {
-            item.unbonding += amount;
-            item_found = true;
-            daily_unbond_queue = DailyUnbondingQueue(BinaryHeap::from(daily_unbond_arr));
-            break
-        }
-    }
-    if !item_found {
-        daily_unbond_queue.0.push(DailyUnbonding::new(amount, day));
-    }
+    // Will add or merge a new unbonding date
+    daily_unbond_queue.0.push(&DailyUnbonding{
+        unbonding: amount,
+        funded: Default::default(),
+        release: round_date(&env.block.time + &stake_config.unbond_time)
+    });
 
     daily_unbond_queue.save(&mut deps.storage)?;
 
     // Check if user has an existing queue, if not, init one
     let mut unbond_queue = UnbondingQueue::may_load(
         &deps.storage, sender.as_str().as_bytes())?
-        .unwrap_or(UnbondingQueue(BinaryHeap::new()));
+        .unwrap_or(UnbondingQueue(VecQueue::new(vec![])));
 
     // Add unbonding to user queue
-    unbond_queue.0.push(Unbonding { amount, release: &env.block.time + stake_config.unbond_time });
+    unbond_queue.0.push(&Unbonding { amount, release: &env.block.time + stake_config.unbond_time });
 
     unbond_queue.save(&mut deps.storage, sender.to_string().as_bytes())?;
 
@@ -562,16 +550,15 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
 
     let mut total = Uint128::zero();
     // Iterate over the sorted queue
-    while !unbond_queue.0.is_empty() {
-        let unbond = unbond_queue.0.peek().unwrap();
+    while !unbond_queue.0.0.is_empty() {
         // Since the queue is sorted, the moment we find a date above the current then we assume
         // that no other item in the queue is eligible
-        if unbond.release <= env.block.time {
+        if unbond_queue.0.0[0].release <= env.block.time {
             // Daily unbond queue is also sorted, therefore as long as its next item is greater
             // than the unbond then we assume its funded
-            if daily_unbond_queue.is_empty() ||
-                round_date(unbond.release) < daily_unbond_queue.peek().unwrap().release {
-                total += unbond.amount;
+            if daily_unbond_queue.0.is_empty() ||
+                round_date(unbond_queue.0.0[0].release) < daily_unbond_queue.0[0].release {
+                total += unbond_queue.0.0[0].amount;
                 unbond_queue.0.pop();
             }
             else {

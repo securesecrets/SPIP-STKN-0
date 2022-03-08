@@ -2,7 +2,7 @@ use std::collections::BinaryHeap;
 use cosmwasm_std::{HumanAddr, Uint128};
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
-use shade_protocol::shd_staking::stake::{DailyUnbonding, Unbonding};
+use shade_protocol::shd_staking::stake::{DailyUnbonding, Unbonding, VecQueue};
 use shade_protocol::storage::{BucketStorage, SingletonStorage};
 
 // used to determine what each token is worth to calculate rewards
@@ -70,7 +70,7 @@ impl SingletonStorage for DistributorsEnabled {
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct UnbondingQueue(pub BinaryHeap<Unbonding>);
+pub struct UnbondingQueue(pub VecQueue<Unbonding>);
 
 impl BucketStorage for UnbondingQueue {
     const NAMESPACE: &'static [u8] = b"unbonding_queue";
@@ -78,7 +78,7 @@ impl BucketStorage for UnbondingQueue {
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct DailyUnbondingQueue(pub BinaryHeap<DailyUnbonding>);
+pub struct DailyUnbondingQueue(pub VecQueue<DailyUnbonding>);
 
 impl SingletonStorage for DailyUnbondingQueue {
     const NAMESPACE: &'static [u8] = b"daily_unbonding_queue";

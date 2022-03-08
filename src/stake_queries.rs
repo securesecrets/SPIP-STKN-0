@@ -1,6 +1,6 @@
 use std::collections::BinaryHeap;
 use cosmwasm_std::{Api, Binary, Extern, HumanAddr, Querier, StdResult, Storage, to_binary, Uint128};
-use shade_protocol::shd_staking::stake::StakeConfig;
+use shade_protocol::shd_staking::stake::{StakeConfig, VecQueue};
 use shade_protocol::storage::{BucketStorage, SingletonStorage};
 use crate::msg::QueryAnswer;
 use crate::stake::{calculate_rewards, shares_per_token};
@@ -49,8 +49,7 @@ pub fn unfunded<S: Storage, A: Api, Q: Querier>(
     let mut queue = DailyUnbondingQueue::load(&deps.storage)?.0;
 
     let mut count = 0;
-    while !queue.is_empty() {
-        let item = queue.pop().unwrap();
+    for item in queue.0.iter() {
         if item.release >= start {
             if count >= total {
                 break
@@ -99,13 +98,12 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
     let mut queue = UnbondingQueue::may_load(
         &deps.storage,
         account.as_str().as_bytes()
-    )?.unwrap_or(UnbondingQueue(BinaryHeap::new())).0;
+    )?.unwrap_or(UnbondingQueue(VecQueue::new(vec![])));
 
     let mut unbonding = Uint128::zero();
     let mut unbonded = Uint128::zero();
 
-    while !queue.is_empty() {
-        let item = queue.pop().unwrap();
+    for item in queue.0.0.iter() {
         if let Some(time) = time {
             if item.release <= time {
                 unbonded += item.amount;

@@ -20,12 +20,12 @@ use crate::transaction_history::{get_transfers, get_txs, store_burn, store_claim
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
 use secret_toolkit::snip20::{register_receive_msg, send_msg, token_info_query};
-use shade_protocol::shd_staking::stake::{StakeConfig};
-use crate::state_staking::{DailyUnbondingQueue, Distributors, DistributorsEnabled, TotalShares, TotalTokens, TotalUnbonding, UnsentStakedTokens};
-use shade_protocol::storage::SingletonStorage;
+use shade_protocol::shd_staking::stake::{StakeConfig, VecQueue};
+use crate::state_staking::{DailyUnbondingQueue, Distributors, DistributorsEnabled, TotalShares, TotalTokens, TotalUnbonding, UnsentStakedTokens, UserShares};
+use shade_protocol::storage::{BucketStorage, SingletonStorage};
 use crate::distributors::{get_distributor, try_add_distributors, try_set_distributors};
 use crate::expose_balance::try_expose_balance;
-use crate::stake::{claim_rewards, try_claim_rewards, try_claim_unbond, try_receive, try_stake_rewards, try_unbond, try_update_stake_config};
+use crate::stake::{claim_rewards, shares_per_token, try_claim_rewards, try_claim_unbond, try_receive, try_stake_rewards, try_unbond, try_update_stake_config};
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -137,7 +137,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     TotalShares(Uint128::zero()).save(&mut deps.storage)?;
 
     // Initialize unbonding queue
-    DailyUnbondingQueue(BinaryHeap::new()).save(&mut deps.storage)?;
+    DailyUnbondingQueue(VecQueue::new(vec![])).save(&mut deps.storage)?;
 
     // Set tokens
     TotalTokens(Uint128::zero()).save(&mut deps.storage)?;
@@ -855,7 +855,7 @@ fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
         )?;
     }
 
-    perform_transfer(&mut deps.storage, &sender_canon, &recipient_canon, amount.u128())?;
+    perform_transfer(&mut deps.storage, &sender, &sender_canon, &recipient, &recipient_canon, amount.u128())?;
 
     store_transfer(
         &mut deps.storage,
@@ -1165,7 +1165,7 @@ fn try_transfer_from_impl<S: Storage, A: Api, Q: Querier>(
 
     use_allowance(&mut deps.storage, env, owner_canon, spender_canon, raw_amount)?;
 
-    perform_transfer(&mut deps.storage, owner_canon, recipient_canon, raw_amount)?;
+    perform_transfer(&mut deps.storage, owner, owner_canon, recipient, recipient_canon, raw_amount)?;
 
     let symbol = Config::from_storage(&mut deps.storage).constants()?.symbol;
 
@@ -1739,13 +1739,15 @@ fn try_burn<S: Storage, A: Api, Q: Querier>(
 
 fn perform_transfer<T: Storage>(
     store: &mut T,
-    from: &CanonicalAddr,
-    to: &CanonicalAddr,
+    from: &HumanAddr,
+    from_canon: &CanonicalAddr,
+    to: &HumanAddr,
+    to_canon: &CanonicalAddr,
     amount: u128,
 ) -> StdResult<()> {
     let mut balances = Balances::from_storage(store);
 
-    let mut from_balance = balances.balance(from);
+    let mut from_balance = balances.balance(from_canon);
     if let Some(new_from_balance) = from_balance.checked_sub(amount) {
         from_balance = new_from_balance;
     } else {
@@ -1754,17 +1756,40 @@ fn perform_transfer<T: Storage>(
             from_balance, amount
         )));
     }
-    balances.set_account_balance(from, from_balance);
+    balances.set_account_balance(from_canon, from_balance);
 
-    let mut to_balance = balances.balance(to);
+    let mut to_balance = balances.balance(to_canon);
     to_balance = to_balance.checked_add(amount).ok_or_else(|| {
         StdError::generic_err("This tx will literally make them too rich. Try transferring less")
     })?;
-    balances.set_account_balance(to, to_balance);
+    balances.set_account_balance(to_canon, to_balance);
 
     // Transfer shares
+    let total_tokens = TotalTokens::load(store)?;
+    let total_shares = TotalTokens::load(store)?;
+
+    let config = StakeConfig::load(store)?;
+
     // calculate shares per token
+    let transfer_shares = Uint128(shares_per_token(
+        &config,
+        &amount,
+        &total_tokens.0.u128(),
+        &total_shares.0.u128()));
+
     // move shares from one user to another
+    let mut from_shares = UserShares::load(
+        store, from.to_string().as_bytes())?;
+
+    from_shares.0 = (from_shares.0 - transfer_shares)?;
+    from_shares.save(store, from.to_string().as_bytes())?;
+
+    let mut to_shares = UserShares::load(
+        store, to.to_string().as_bytes())?;
+    to_shares.0 += transfer_shares;
+    to_shares.save(store, to.to_string().as_bytes())?;
+
+    // TODO: get token lock up queue
 
     Ok(())
 }
