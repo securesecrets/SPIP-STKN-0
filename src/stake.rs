@@ -9,7 +9,7 @@ use shade_protocol::utils::asset::Contract;
 use crate::contract::{check_if_admin, try_mint_impl};
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
-use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, TotalUnbonding, UnbondingQueue, UnsentStakedTokens, UserShares};
+use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, TotalUnbonding, UnbondingQueue, UnsentStakedTokens, UserCooldown, UserShares};
 use crate::state::{Balances, Config, Constants, ReadonlyConfig};
 use crate::transaction_history::{store_add_reward, store_claim_reward, store_claim_unbond, store_fund_unbond, store_stake, store_unbond};
 
@@ -63,12 +63,17 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
     })
 }
 
+const DAY: u64 = 86400; //60 * 60 * 24
+
 ///
 /// Rounds down a date to the nearest day
 ///
 fn round_date(date: u64) -> u64 {
-    let day = 86400; //60 * 60 * 24
-    date - (date % day)
+    date - (date % DAY)
+}
+
+pub fn round_up_date(date: u64) -> u64 {
+    round_date(date) + DAY
 }
 
 ///
@@ -173,8 +178,10 @@ fn remove_balance<S: Storage>(
     stake_config: &StakeConfig,
     sender: &HumanAddr,
     sender_canon: &CanonicalAddr,
-    amount: u128
+    amount: u128,
+    time: u64
 ) -> StdResult<()> {
+
     // Return insufficient funds
     let mut user_shares = UserShares::may_load(storage, sender.as_str().as_bytes())?
         .expect("No funds");
@@ -208,8 +215,30 @@ fn remove_balance<S: Storage>(
         true
     )?;
 
+    // Remove cooldown if needed
+    let mut cooldown = UserCooldown::may_load(
+        storage,
+        sender.as_str().as_bytes()
+    )?.unwrap_or(UserCooldown{
+        total: Uint128::zero(),
+        queue: VecQueue(vec![])
+    });
+
+    cooldown.update(time);
+
+    // Load balance
     let mut balances = Balances::from_storage(storage);
     let mut account_balance = balances.balance(sender_canon);
+
+    // Calculate if items need to be removed from cooldown queue
+    let wrapped_amount = Uint128(amount);
+    // Get tokens that arent in a queue
+    let unlocked_tokens = (Uint128(account_balance) - cooldown.total)?;
+    if wrapped_amount > unlocked_tokens {
+        // Calculate queue tokens to remove
+        cooldown.remove_cooldown((wrapped_amount - unlocked_tokens)?);
+    }
+
     if let Some(new_balance) = account_balance.checked_sub(amount) {
         account_balance = new_balance;
     } else {
@@ -218,6 +247,7 @@ fn remove_balance<S: Storage>(
         ));
     }
     balances.set_account_balance(sender_canon, account_balance);
+    cooldown.save(storage, sender.as_str().as_bytes())?;
     Ok(())
 }
 
@@ -240,6 +270,7 @@ pub fn claim_rewards<S: Storage>(
         stake_config, user_balance, user_shares.0.u128(),
         total_tokens.0.u128(), total_shares.0.u128());
 
+    // Do nothing if no rewards are gonna be claimed
     if reward_token == 0 {
         return Ok(reward_token)
     }
@@ -316,8 +347,6 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
     msg: Option<Binary>,
     memo: Option<String>
 ) -> StdResult<HandleResponse> {
-
-    // TODO: add a way to limit bonding if in maintenance mode
 
     let sender_canon = deps.api.canonical_address(&sender)?;
 
@@ -396,6 +425,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
         }
 
         ReceiveType::Unbond => {
+            // TODO: have a key that allows for overfunding so unstakers are instantly funded
             let mut remaining_amount = amount;
 
             let mut daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?;
@@ -450,6 +480,8 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     amount: Uint128,
 ) -> StdResult<HandleResponse> {
 
+    //TODO: remove from cooldown queue if needed
+
     let sender = env.message.sender;
     let sender_canon = deps.api.canonical_address(&sender)?;
 
@@ -459,7 +491,7 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     let claim = claim_rewards(&mut deps.storage, &stake_config, &sender, &sender_canon)?;
 
     // Subtract tokens from user balance
-    remove_balance(&mut deps.storage, &stake_config, &sender, &sender_canon, amount.u128())?;
+    remove_balance(&mut deps.storage, &stake_config, &sender, &sender_canon, amount.u128(), env.block.time)?;
 
     let mut totalUnbonding = TotalUnbonding::load(&mut deps.storage)?;
     totalUnbonding.0 += amount;
@@ -484,7 +516,7 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     // Add unbonding to user queue
     unbond_queue.0.push(&Unbonding { amount, release: &env.block.time + stake_config.unbond_time });
 
-    unbond_queue.save(&mut deps.storage, sender.to_string().as_bytes())?;
+    unbond_queue.save(&mut deps.storage, sender.as_str().as_bytes())?;
 
     // Store the tx
     let symbol = ReadonlyConfig::from_storage(&deps.storage).constants()?.symbol;
@@ -848,7 +880,28 @@ mod tests {
         assert_eq!(shares, 0);
     }
 
+    #[test]
+    fn simulate_claim_rewards() {
+        let token_decimals = 8;
+        let shares_decimals = 18;
+        let config = init_config(token_decimals, shares_decimals);
+        let mut user_shares = Uint128::new(50000000000000);
+
+        let user_balance = 5000;
+
+        // Get total supplied tokens
+        let mut total_shares = Uint128::new(50000000000000);
+        let mut total_tokens = Uint128::new(5000);
+
+        let (reward_token, reward_shares) = calculate_rewards(
+            &config, user_balance, user_shares.u128(),
+            total_tokens.u128(), total_shares.u128());
+
+        assert_eq!(reward_token, 0);
+    }
+
     use rand::Rng;
+    use secret_cosmwasm_math_compat::Uint128;
 
     #[test]
     fn staking_simulation() {

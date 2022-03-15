@@ -41,10 +41,6 @@ pub struct Constants {
     pub prng_seed: Vec<u8>,
     // privacy configuration
     pub total_supply_is_public: bool,
-    // is mint enabled
-    pub mint_is_enabled: bool,
-    // is burn enabled
-    pub burn_is_enabled: bool,
     // the address of this contract, used to validate query permits
     pub contract_address: HumanAddr,
 }

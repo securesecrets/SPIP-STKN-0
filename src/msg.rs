@@ -11,12 +11,6 @@ use secret_toolkit::permit::Permit;
 use shade_protocol::utils::asset::Contract;
 use shade_protocol::shd_staking::stake::StakeConfig;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
-pub struct InitialBalance {
-    pub address: HumanAddr,
-    pub amount: Uint128,
-}
-
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InitMsg {
     pub name: String,
@@ -25,7 +19,6 @@ pub struct InitMsg {
     // Will default to staked token decimals if not set
     pub decimals: Option<u8>,
     pub share_decimals: u8,
-    pub initial_balances: Option<Vec<InitialBalance>>,
     pub prng_seed: Binary,
     pub config: Option<InitConfig>,
 
@@ -55,25 +48,11 @@ pub struct InitConfig {
     /// Indicates whether the total supply is public or should be kept secret.
     /// default: False
     public_total_supply: Option<bool>,
-    /// Indicates whether mint functionality should be enabled
-    /// default: False
-    enable_mint: Option<bool>,
-    /// Indicates whether burn functionality should be enabled
-    /// default: False
-    enable_burn: Option<bool>,
 }
 
 impl InitConfig {
     pub fn public_total_supply(&self) -> bool {
         self.public_total_supply.unwrap_or(false)
-    }
-
-    pub fn mint_enabled(&self) -> bool {
-        self.enable_mint.unwrap_or(false)
-    }
-
-    pub fn burn_enabled(&self) -> bool {
-        self.enable_burn.unwrap_or(false)
     }
 }
 
@@ -151,11 +130,6 @@ pub enum HandleMsg {
         actions: Vec<batch::SendAction>,
         padding: Option<String>,
     },
-    Burn {
-        amount: Uint128,
-        memo: Option<String>,
-        padding: Option<String>,
-    },
     RegisterReceive {
         code_hash: String,
         padding: Option<String>,
@@ -206,40 +180,6 @@ pub enum HandleMsg {
         actions: Vec<batch::SendFromAction>,
         padding: Option<String>,
     },
-    BurnFrom {
-        owner: HumanAddr,
-        amount: Uint128,
-        memo: Option<String>,
-        padding: Option<String>,
-    },
-    BatchBurnFrom {
-        actions: Vec<batch::BurnFromAction>,
-        padding: Option<String>,
-    },
-
-    // Mint
-    Mint {
-        recipient: HumanAddr,
-        amount: Uint128,
-        memo: Option<String>,
-        padding: Option<String>,
-    },
-    BatchMint {
-        actions: Vec<batch::MintAction>,
-        padding: Option<String>,
-    },
-    AddMinters {
-        minters: Vec<HumanAddr>,
-        padding: Option<String>,
-    },
-    RemoveMinters {
-        minters: Vec<HumanAddr>,
-        padding: Option<String>,
-    },
-    SetMinters {
-        minters: Vec<HumanAddr>,
-        padding: Option<String>,
-    },
 
     // Admin
     ChangeAdmin {
@@ -284,9 +224,6 @@ pub enum HandleAnswer {
     BatchSend {
         status: ResponseStatus,
     },
-    Burn {
-        status: ResponseStatus,
-    },
     RegisterReceive {
         status: ResponseStatus,
     },
@@ -318,29 +255,6 @@ pub enum HandleAnswer {
         status: ResponseStatus,
     },
     BatchSendFrom {
-        status: ResponseStatus,
-    },
-    BurnFrom {
-        status: ResponseStatus,
-    },
-    BatchBurnFrom {
-        status: ResponseStatus,
-    },
-
-    // Mint
-    Mint {
-        status: ResponseStatus,
-    },
-    BatchMint {
-        status: ResponseStatus,
-    },
-    AddMinters {
-        status: ResponseStatus,
-    },
-    RemoveMinters {
-        status: ResponseStatus,
-    },
-    SetMinters {
         status: ResponseStatus,
     },
 
@@ -406,7 +320,6 @@ pub enum QueryMsg {
         page: Option<u32>,
         page_size: u32,
     },
-    Minters {},
     WithPermit {
         permit: Permit,
         query: QueryWithPermit,
@@ -471,6 +384,7 @@ pub enum QueryAnswer {
     StakeRate {
         shares: Uint128
     },
+    // TODO: add cooldown
     Staked {
         tokens: Uint128,
         shares: Uint128,
@@ -499,8 +413,6 @@ pub enum QueryAnswer {
     },
     TokenConfig {
         public_total_supply: bool,
-        mint_enabled: bool,
-        burn_enabled: bool,
     },
     ContractStatus {
         status: ContractStatusLevel,
@@ -529,9 +441,6 @@ pub enum QueryAnswer {
     ViewingKeyError {
         msg: String,
     },
-    Minters {
-        minters: Vec<HumanAddr>,
-    },
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
@@ -546,28 +455,30 @@ pub enum ResponseStatus {
     Failure,
 }
 
-// TODO: expand on this with stopping staking and stuff
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractStatusLevel {
     NormalRun,
-    StopAllButRedeems,
+    StopBonding,
+    StopAllButUnbond, //Can set time to 0 for instant unbond
     StopAll,
 }
 
 pub fn status_level_to_u8(status_level: ContractStatusLevel) -> u8 {
     match status_level {
         ContractStatusLevel::NormalRun => 0,
-        ContractStatusLevel::StopAllButRedeems => 1,
-        ContractStatusLevel::StopAll => 2,
+        ContractStatusLevel::StopBonding => 1,
+        ContractStatusLevel::StopAllButUnbond => 2,
+        ContractStatusLevel::StopAll => 3,
     }
 }
 
 pub fn u8_to_status_level(status_level: u8) -> StdResult<ContractStatusLevel> {
     match status_level {
         0 => Ok(ContractStatusLevel::NormalRun),
-        1 => Ok(ContractStatusLevel::StopAllButRedeems),
-        2 => Ok(ContractStatusLevel::StopAll),
+        1 => Ok(ContractStatusLevel::StopBonding),
+        2 => Ok(ContractStatusLevel::StopAllButUnbond),
+        3 => Ok(ContractStatusLevel::StopAll),
         _ => Err(StdError::generic_err("Invalid state level")),
     }
 }

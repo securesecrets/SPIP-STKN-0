@@ -2,7 +2,7 @@ use std::collections::BinaryHeap;
 use cosmwasm_std::{HumanAddr, Uint128};
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
-use shade_protocol::shd_staking::stake::{DailyUnbonding, Unbonding, VecQueue};
+use shade_protocol::shd_staking::stake::{Cooldown, DailyUnbonding, Unbonding, VecQueue};
 use shade_protocol::storage::{BucketStorage, SingletonStorage};
 
 // used to determine what each token is worth to calculate rewards
@@ -82,4 +82,50 @@ pub struct DailyUnbondingQueue(pub VecQueue<DailyUnbonding>);
 
 impl SingletonStorage for DailyUnbondingQueue {
     const NAMESPACE: &'static [u8] = b"daily_unbonding_queue";
+}
+
+// Used for vote cooldown after send
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct UserCooldown {
+    pub total: Uint128,
+    pub queue: VecQueue<Cooldown>
+}
+
+impl BucketStorage for UserCooldown {
+    const NAMESPACE: &'static [u8] = b"user_cooldown";
+}
+
+impl UserCooldown {
+    pub fn add_cooldown(&mut self, cooldown: Cooldown) {
+        self.total += cooldown.amount;
+        self.queue.push(&cooldown);
+    }
+
+    pub fn remove_cooldown(&mut self, amount: Uint128) {
+        let mut remaining = amount;
+        while remaining != Uint128::zero() {
+            let index = self.queue.0.len() - 1;
+            if self.queue.0[index].amount <= remaining {
+                let item = self.queue.0.remove(index);
+                remaining = (remaining - item.amount).unwrap();
+            }
+            else {
+                self.queue.0[index].amount = (self.queue.0[index].amount - remaining).unwrap();
+                break
+            }
+        }
+    }
+
+    pub fn update(&mut self, time: u64) {
+        while !self.queue.0.is_empty() {
+            if self.queue.0[0].release <= time {
+                let i = self.queue.pop().unwrap();
+                self.total = (self.total - i.amount).unwrap();
+            }
+            else {
+                break
+            }
+        }
+    }
 }
