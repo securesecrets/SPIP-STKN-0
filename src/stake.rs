@@ -90,33 +90,7 @@ fn add_balance<S: Storage>(
     let mut user_shares = UserShares::may_load(storage, sender.as_str().as_bytes())?
         .unwrap_or(UserShares(Uint128::zero()));
 
-    // Get total supplied tokens
-    let mut total_shares = TotalShares::load(storage)?;
-    let mut total_tokens = TotalTokens::load(storage)?;
-
-    // Calculate shares per token supplied
-    let shares = Uint128(shares_per_token(
-        &stake_config,
-        &amount,
-        &total_tokens.0.u128(),
-        &total_shares.0.u128(),
-    ));
-
-    // Update user's shares
-    user_shares.0 += shares;
-    user_shares.save(storage, sender.as_str().as_bytes())?;
-
-    // Update total shares
-    total_shares.0 += shares;
-    total_shares.save(storage)?;
-
-    // Update total staked
-    let supply = ReadonlyConfig::from_storage(storage).total_supply();
-    Config::from_storage(storage).set_total_supply(supply + amount);
-    total_tokens.0 += Uint128(amount);
-    total_tokens.save(storage)?;
-
-    // Update user staked / tokens
+    // Update user staked tokens
     let mut balances = Balances::from_storage(storage);
     let mut account_balance = balances.balance(sender_canon);
     if let Some(new_balance) = account_balance.checked_add(amount) {
@@ -127,6 +101,46 @@ fn add_balance<S: Storage>(
         ));
     }
     balances.set_account_balance(sender_canon, account_balance);
+
+    // Get total supplied tokens
+    let mut total_shares = TotalShares::load(storage)?;
+    let total_tokens = TotalTokens::load(storage)?;
+
+    // Update total staked
+    // We do this before reaching shares to get overflows out of the way
+    let supply = ReadonlyConfig::from_storage(storage).total_supply();
+    Config::from_storage(storage).set_total_supply(supply + amount);
+    if let Some(total_staked) = total_tokens.0.u128().checked_add(amount) {
+        TotalTokens(Uint128(total_staked)).save(storage);
+    }
+    else {
+        return Err(StdError::generic_err(
+            "Total staked tokens overflow",
+        ));
+    }
+
+    // Calculate shares per token supplied
+    let shares = Uint128(shares_per_token(
+        &stake_config,
+        &amount,
+        &total_tokens.0.u128(),
+        &total_shares.0.u128(),
+    )?);
+
+    // Update total shares
+    if let Some(total_added_shares) = total_shares.0.u128().checked_add(shares.u128()) {
+        total_shares = TotalShares(Uint128(total_added_shares));
+    }
+    else {
+        return Err(StdError::generic_err(
+            "Shares overflow",
+        ));
+    }
+    total_shares.save(storage)?;
+
+    // Update user's shares - this will not break as total_shares >= user_shares
+    user_shares.0 += shares;
+    user_shares.save(storage, sender.as_str().as_bytes())?;
 
     Ok(())
 }
@@ -196,7 +210,7 @@ fn remove_balance<S: Storage>(
         &amount,
         &total_tokens.0.u128(),
         &total_shares.0.u128(),
-    );
+    )?;
 
     // Update user's shares
     if let Some(user_shares) = user_shares.0.u128().checked_sub(shares) {
@@ -296,32 +310,60 @@ pub fn claim_rewards<S: Storage>(
 
 pub fn shares_per_token(
     config: &StakeConfig,
-    tokens: &u128,
+    token_amount: &u128,
     total_tokens: &u128,
     total_shares: &u128
-) -> u128 {
+) -> StdResult<u128> {
+    let t_tokens = u256::from(total_tokens);
+    let t_shares = u256::from(total_shares);
+    let tokens = u256::from(token_amount);
+
     if *total_tokens == 0 && *total_shares == 0 {
         // Used to normalize the staked token to the stake token
-        let token_multiplier = 10u128.pow(config.decimal_difference.into());
-        return tokens * token_multiplier
+        let token_multiplier = u256::from(10).pow(config.decimal_difference.into());
+        if let Some(shares) = tokens.checked_mul(token_multiplier) {
+            return Ok(shares.as_u128())
+        }
+        else {
+            return Err(StdError::generic_err("Share calculation overflow"))
+        }
     }
 
-    tokens * total_shares / total_tokens
+    if let Some(shares) = tokens.checked_mul(t_shares) {
+        return Ok((shares/t_tokens).as_u128())
+    }
+    else {
+        return Err(StdError::generic_err("Share calculation overflow"))
+    }
 }
 
 pub fn tokens_per_share(
     config: &StakeConfig,
-    shares: &u128,
+    shares_amount: &u128,
     total_tokens: &u128,
     total_shares: &u128
-) -> u128 {
+) -> StdResult<u128> {
+    let t_tokens = u256::from(total_tokens);
+    let t_shares = u256::from(total_shares);
+    let shares = u256::from(shares_amount);
+
     if *total_tokens == 0 && *total_shares == 0 {
-        // Used to normalize the staked token to the stake token
-        let token_multiplier = 10u128.pow(config.decimal_difference.into());
-        return shares / token_multiplier
+        // Used to normalize the staked token to the stake tokes
+        let token_multiplier = u256::from(10).pow(config.decimal_difference.into());
+        if let Some(tokens) = shares.checked_div(token_multiplier) {
+            return Ok(tokens.as_u128())
+        }
+        else {
+            return Err(StdError::generic_err("Token calculation overflow"))
+        }
     }
 
-    (u256::from(*total_tokens) * u256::from(*shares) / u256::from(*total_shares)).as_u128()
+    if let Some(tokens) = shares.checked_mul(t_tokens) {
+        return Ok((tokens/t_shares).as_u128())
+    }
+    else {
+        return Err(StdError::generic_err("Token calculation overflow"))
+    }
 }
 
 ///
@@ -334,8 +376,8 @@ pub fn calculate_rewards(
     total_tokens: u128,
     total_shares: u128
 ) -> (u128, u128) {
-    let token_reward = tokens_per_share(config, &shares, &total_tokens, &total_shares) - tokens;
-    (token_reward, shares_per_token(config, &token_reward, &total_tokens, &total_shares))
+    let token_reward = tokens_per_share(config, &shares, &total_tokens, &total_shares)? - tokens;
+    (token_reward, shares_per_token(config, &token_reward, &total_tokens, &total_shares)?)
 }
 
 pub fn try_receive<S: Storage, A: Api, Q: Querier>(
@@ -922,7 +964,7 @@ mod tests {
                     1..100 * 10u128.pow(token_decimals.into()));
 
                 let shares = shares_per_token(
-                    &config, &tokens, &t_t, &t_s);
+                    &config, &tokens, &t_t, &t_s).unwrap();
 
                 stakers.push((
                     tokens,
