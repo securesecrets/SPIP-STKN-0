@@ -1,5 +1,5 @@
 [package]
-name = "spip_stkn_0"
+name = "spip_stkd_0"
 version = "0.1.0"
 authors = ["Guy <guyg@securesecrets.org>"]
 edition = "2018"
