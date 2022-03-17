@@ -9,7 +9,7 @@ use crate::viewing_key::ViewingKey;
 use cosmwasm_std::{Binary, HumanAddr, StdError, StdResult, Uint128};
 use secret_toolkit::permit::Permit;
 use shade_protocol::utils::asset::Contract;
-use shade_protocol::shd_staking::stake::StakeConfig;
+use shade_protocol::shd_staking::stake::{QueueItem, StakeConfig, VecQueue};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InitMsg {
@@ -96,8 +96,19 @@ pub enum HandleMsg {
         memo: Option<String>,
         padding: Option<String>
     },
+    ExposeBalanceWithCooldown {
+        recipient: HumanAddr,
+        code_hash: Option<String>,
+        msg: Option<Binary>,
+        memo: Option<String>,
+        padding: Option<String>
+    },
 
     // Distributors
+    SetDistributorsStatus {
+        enabled: bool,
+        padding: Option<String>
+    },
     AddDistributors {
         distributors: Vec<HumanAddr>,
         padding: Option<String>
@@ -208,6 +219,7 @@ pub enum HandleAnswer {
     ClaimRewards { status: ResponseStatus },
     StakeRewards { status: ResponseStatus },
     ExposeBalance { status: ResponseStatus },
+    SetDistributorsStatus { status: ResponseStatus },
     AddDistributors { status: ResponseStatus },
     SetDistributors { status: ResponseStatus },
 
@@ -384,13 +396,13 @@ pub enum QueryAnswer {
     StakeRate {
         shares: Uint128
     },
-    // TODO: add cooldown
     Staked {
         tokens: Uint128,
         shares: Uint128,
         pending_rewards: Uint128,
         unbonding: Uint128,
-        unbonded: Option<Uint128>
+        unbonded: Option<Uint128>,
+        cooldown: VecQueue<QueueItem>
     },
     Unbonding {
         total: Uint128
@@ -401,7 +413,7 @@ pub enum QueryAnswer {
 
     // Distributors
     Distributors {
-        distributors: Vec<HumanAddr>
+        distributors: Option<Vec<HumanAddr>>
     },
 
     // Snip20 stuff

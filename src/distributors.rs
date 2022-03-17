@@ -15,6 +15,23 @@ pub fn get_distributor<S: Storage, A: Api, Q: Querier>(
     })
 }
 
+pub fn try_set_distributors_status<S: Storage, A: Api, Q: Querier>(
+    deps: &mut Extern<S, A, Q>,
+    env: Env,
+    enabled: bool
+) -> StdResult<HandleResponse> {
+    let mut config = Config::from_storage(&mut deps.storage);
+
+    check_if_admin(&config, &env.message.sender)?;
+
+    DistributorsEnabled(enabled).save(&mut deps.storage)?;
+
+    Ok(HandleResponse {
+        messages: vec![],
+        log: vec![],
+        data: Some(to_binary(&HandleAnswer::SetDistributorsStatus { status: Success })?),
+    })
+}
 
 pub fn try_add_distributors<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -59,6 +76,9 @@ pub fn distributors<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<Binary> {
 
     to_binary(&QueryAnswer::Distributors {
-        distributors: Distributors::load(&deps.storage)?.0
+        distributors: match DistributorsEnabled::load(&deps.storage)?.0 {
+            true => Some(Distributors::load(&deps.storage)?.0),
+            false => None
+        }
     })
 }

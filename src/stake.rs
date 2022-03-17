@@ -13,6 +13,8 @@ use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, TotalU
 use crate::state::{Balances, Config, Constants, ReadonlyConfig};
 use crate::transaction_history::{store_add_reward, store_claim_reward, store_claim_unbond, store_fund_unbond, store_stake, store_unbond};
 
+//TODO: set errors
+
 pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
@@ -108,8 +110,6 @@ fn add_balance<S: Storage>(
 
     // Update total staked
     // We do this before reaching shares to get overflows out of the way
-    let supply = ReadonlyConfig::from_storage(storage).total_supply();
-    Config::from_storage(storage).set_total_supply(supply + amount);
     if let Some(total_staked) = total_tokens.0.u128().checked_add(amount) {
         TotalTokens(Uint128(total_staked)).save(storage);
     }
@@ -118,6 +118,8 @@ fn add_balance<S: Storage>(
             "Total staked tokens overflow",
         ));
     }
+    let supply = ReadonlyConfig::from_storage(storage).total_supply();
+    Config::from_storage(storage).set_total_supply(supply + amount);
 
     // Calculate shares per token supplied
     let shares = Uint128(shares_per_token(
@@ -190,14 +192,14 @@ fn subtract_internal_supply<S: Storage>(
 fn remove_balance<S: Storage>(
     storage: &mut S,
     stake_config: &StakeConfig,
-    sender: &HumanAddr,
-    sender_canon: &CanonicalAddr,
+    account: &HumanAddr,
+    account_cannon: &CanonicalAddr,
     amount: u128,
     time: u64
 ) -> StdResult<()> {
 
     // Return insufficient funds
-    let mut user_shares = UserShares::may_load(storage, sender.as_str().as_bytes())?
+    let mut user_shares = UserShares::may_load(storage, account.as_str().as_bytes())?
         .expect("No funds");
 
     // Get total supplied tokens
@@ -214,7 +216,7 @@ fn remove_balance<S: Storage>(
 
     // Update user's shares
     if let Some(user_shares) = user_shares.0.u128().checked_sub(shares) {
-        UserShares(Uint128(user_shares)).save(storage, sender.as_str().as_bytes())?;
+        UserShares(Uint128(user_shares)).save(storage, account.as_str().as_bytes())?;
     }
     else {
         return Err(StdError::generic_err("Insufficient shares"))
@@ -229,29 +231,10 @@ fn remove_balance<S: Storage>(
         true
     )?;
 
-    // Remove cooldown if needed
-    let mut cooldown = UserCooldown::may_load(
-        storage,
-        sender.as_str().as_bytes()
-    )?.unwrap_or(UserCooldown{
-        total: Uint128::zero(),
-        queue: VecQueue(vec![])
-    });
-
-    cooldown.update(time);
-
     // Load balance
     let mut balances = Balances::from_storage(storage);
-    let mut account_balance = balances.balance(sender_canon);
-
-    // Calculate if items need to be removed from cooldown queue
-    let wrapped_amount = Uint128(amount);
-    // Get tokens that arent in a queue
-    let unlocked_tokens = (Uint128(account_balance) - cooldown.total)?;
-    if wrapped_amount > unlocked_tokens {
-        // Calculate queue tokens to remove
-        cooldown.remove_cooldown((wrapped_amount - unlocked_tokens)?);
-    }
+    let mut account_balance = balances.balance(account_cannon);
+    let account_tokens = account_balance.clone();
 
     if let Some(new_balance) = account_balance.checked_sub(amount) {
         account_balance = new_balance;
@@ -260,8 +243,8 @@ fn remove_balance<S: Storage>(
             "This burn attempt would decrease the account's balance to a negative",
         ));
     }
-    balances.set_account_balance(sender_canon, account_balance);
-    cooldown.save(storage, sender.as_str().as_bytes())?;
+    balances.set_account_balance(account_cannon, account_balance);
+    remove_from_cooldown(storage, account, Uint128(account_tokens), Uint128(amount), time)?;
     Ok(())
 }
 
@@ -282,7 +265,7 @@ pub fn claim_rewards<S: Storage>(
 
     let (reward_token, reward_shares) = calculate_rewards(
         stake_config, user_balance, user_shares.0.u128(),
-        total_tokens.0.u128(), total_shares.0.u128());
+        total_tokens.0.u128(), total_shares.0.u128())?;
 
     // Do nothing if no rewards are gonna be claimed
     if reward_token == 0 {
@@ -314,13 +297,13 @@ pub fn shares_per_token(
     total_tokens: &u128,
     total_shares: &u128
 ) -> StdResult<u128> {
-    let t_tokens = u256::from(total_tokens);
-    let t_shares = u256::from(total_shares);
-    let tokens = u256::from(token_amount);
+    let t_tokens = u256::from(*total_tokens);
+    let t_shares = u256::from(*total_shares);
+    let tokens = u256::from(*token_amount);
 
     if *total_tokens == 0 && *total_shares == 0 {
         // Used to normalize the staked token to the stake token
-        let token_multiplier = u256::from(10).pow(config.decimal_difference.into());
+        let token_multiplier = u256::from(10u16).pow(config.decimal_difference.into());
         if let Some(shares) = tokens.checked_mul(token_multiplier) {
             return Ok(shares.as_u128())
         }
@@ -343,13 +326,13 @@ pub fn tokens_per_share(
     total_tokens: &u128,
     total_shares: &u128
 ) -> StdResult<u128> {
-    let t_tokens = u256::from(total_tokens);
-    let t_shares = u256::from(total_shares);
-    let shares = u256::from(shares_amount);
+    let t_tokens = u256::from(*total_tokens);
+    let t_shares = u256::from(*total_shares);
+    let shares = u256::from(*shares_amount);
 
     if *total_tokens == 0 && *total_shares == 0 {
         // Used to normalize the staked token to the stake tokes
-        let token_multiplier = u256::from(10).pow(config.decimal_difference.into());
+        let token_multiplier = u256::from(10u16).pow(config.decimal_difference.into());
         if let Some(tokens) = shares.checked_div(token_multiplier) {
             return Ok(tokens.as_u128())
         }
@@ -375,9 +358,9 @@ pub fn calculate_rewards(
     shares: u128,
     total_tokens: u128,
     total_shares: u128
-) -> (u128, u128) {
+) -> StdResult<(u128, u128)> {
     let token_reward = tokens_per_share(config, &shares, &total_tokens, &total_shares)? - tokens;
-    (token_reward, shares_per_token(config, &token_reward, &total_tokens, &total_shares)?)
+    Ok((token_reward, shares_per_token(config, &token_reward, &total_tokens, &total_shares)?))
 }
 
 pub fn try_receive<S: Storage, A: Api, Q: Querier>(
@@ -467,7 +450,6 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
         }
 
         ReceiveType::Unbond => {
-            // TODO: have a key that allows for overfunding so unstakers are instantly funded
             let mut remaining_amount = amount;
 
             let mut daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?;
@@ -516,14 +498,37 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
     })
 }
 
+pub fn remove_from_cooldown<S: Storage>(
+    store: &mut S,
+    user: &HumanAddr,
+    user_tokens: Uint128,
+    remove_amount: Uint128,
+    time: u64,
+) -> StdResult<()> {
+    let mut cooldown = UserCooldown::may_load(
+        store,
+        user.as_str().as_bytes()
+    )?.unwrap_or(UserCooldown{
+        total: Uint128::zero(),
+        queue: VecQueue(vec![])
+    });
+
+    cooldown.update(time);
+
+    let unlocked_tokens = (user_tokens - cooldown.total)?;
+    if remove_amount > unlocked_tokens {
+        cooldown.remove_cooldown((remove_amount - unlocked_tokens)?);
+    }
+    cooldown.save(store, user.as_str().as_bytes())?;
+
+    Ok(())
+}
+
 pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     amount: Uint128,
 ) -> StdResult<HandleResponse> {
-
-    //TODO: remove from cooldown queue if needed
-
     let sender = env.message.sender;
     let sender_canon = deps.api.canonical_address(&sender)?;
 
@@ -822,17 +827,17 @@ mod tests {
         let share_1 = 10000000 * 10u128.pow(shares_decimals.into());
 
         // Check for proper init
-        assert_eq!(tokens_per_share(&config, &share_1, &0, &0), token_1);
+        assert_eq!(tokens_per_share(&config, &share_1, &0, &0).unwrap(), token_1);
 
         // Check for stability
-        assert_eq!(tokens_per_share(&config, &share_1, &token_1, &share_1), token_1);
-        assert_eq!(tokens_per_share(&config, &share_1, &(token_1*2), &(share_1*2)), token_1);
+        assert_eq!(tokens_per_share(&config, &share_1, &token_1, &share_1).unwrap(), token_1);
+        assert_eq!(tokens_per_share(&config, &share_1, &(token_1*2), &(share_1*2)).unwrap(), token_1);
 
         // check that shares increase when tokens decrease
-        assert!(tokens_per_share(&config, &share_1, &(token_1*2), &share_1) > token_1);
+        assert!(tokens_per_share(&config, &share_1, &(token_1*2), &share_1).unwrap() > token_1);
 
         // check that shares decrease when tokens increase
-        assert!(tokens_per_share(&config, &share_1, &token_1, &(share_1*2)) < token_1);
+        assert!(tokens_per_share(&config, &share_1, &token_1, &(share_1*2)).unwrap() < token_1);
 
     }
 
@@ -846,17 +851,17 @@ mod tests {
         let share_1 = 100 * 10u128.pow(shares_decimals.into());
 
         // Check for proper init
-        assert_eq!(shares_per_token(&config, &token_1, &0, &0), share_1);
+        assert_eq!(shares_per_token(&config, &token_1, &0, &0).unwrap(), share_1);
 
         // Check for stability
-        assert_eq!(shares_per_token(&config, &token_1, &token_1, &share_1), share_1);
-        assert_eq!(shares_per_token(&config, &token_1, &(token_1*2), &(share_1*2)), share_1);
+        assert_eq!(shares_per_token(&config, &token_1, &token_1, &share_1).unwrap(), share_1);
+        assert_eq!(shares_per_token(&config, &token_1, &(token_1*2), &(share_1*2)).unwrap(), share_1);
 
         // check that shares increase when tokens decrease
-        assert!(shares_per_token(&config, &token_1, &(token_1*2), &share_1) < share_1);
+        assert!(shares_per_token(&config, &token_1, &(token_1*2), &share_1).unwrap() < share_1);
 
         // check that shares decrease when tokens increase
-        assert!(shares_per_token(&config, &token_1, &token_1, &(share_1*2)) > share_1);
+        assert!(shares_per_token(&config, &token_1, &token_1, &(share_1*2)).unwrap() > share_1);
     }
 
     #[test]
@@ -885,7 +890,7 @@ mod tests {
             u_s,
             t_t,
             t_s,
-        );
+        ).unwrap();
 
         assert_eq!(tokens, 0);
         assert_eq!(shares, 0);
@@ -900,7 +905,7 @@ mod tests {
             u_s,
             t_t,
             t_s,
-        );
+        ).unwrap();
 
         assert_eq!(tokens, reward * 2 / 3);
         t_t = t_t - tokens;
@@ -916,7 +921,7 @@ mod tests {
             u_s,
             t_t,
             t_s,
-        );
+        ).unwrap();
 
         assert_eq!(tokens, 0);
         assert_eq!(shares, 0);
@@ -937,7 +942,7 @@ mod tests {
 
         let (reward_token, reward_shares) = calculate_rewards(
             &config, user_balance, user_shares.u128(),
-            total_tokens.u128(), total_shares.u128());
+            total_tokens.u128(), total_shares.u128()).unwrap();
 
         assert_eq!(reward_token, 0);
     }
@@ -987,7 +992,7 @@ mod tests {
                     shares,
                     t_t,
                     t_s
-                );
+                ).unwrap();
 
                 t_t -= r_tokens;
                 t_s -= r_shares;
@@ -999,7 +1004,7 @@ mod tests {
                     shares,
                     t_t,
                     t_s
-                );
+                ).unwrap();
                 assert_eq!(r_tokens, 0);
                 assert_eq!(r_shares, 0);
 
@@ -1017,7 +1022,7 @@ mod tests {
                     shares,
                     t_t,
                     t_s
-                );
+                ).unwrap();
 
                 t_t -= r_tokens;
                 t_s -= r_shares;
@@ -1029,7 +1034,7 @@ mod tests {
                     shares,
                     t_t,
                     t_s
-                );
+                ).unwrap();
                 assert_eq!(r_tokens, 0);
                 assert_eq!(r_shares, 0);
             }

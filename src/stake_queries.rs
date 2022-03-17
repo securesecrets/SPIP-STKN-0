@@ -5,7 +5,7 @@ use shade_protocol::storage::{BucketStorage, SingletonStorage};
 use crate::msg::QueryAnswer;
 use crate::stake::{calculate_rewards, shares_per_token};
 use crate::state::{ReadonlyBalances};
-use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, TotalUnbonding, UnbondingQueue, UserShares};
+use crate::state_staking::{DailyUnbondingQueue, TotalShares, TotalTokens, TotalUnbonding, UnbondingQueue, UserCooldown, UserShares};
 
 pub fn stake_config<S: Storage, A: Api, Q: Querier>(
     deps: &Extern<S, A, Q>,
@@ -34,7 +34,7 @@ pub fn stake_rate<S: Storage, A: Api, Q: Querier>(
             &1,
             &TotalTokens::load(&deps.storage)?.0.u128(),
             &TotalShares::load(&deps.storage)?.0.u128()
-        ))
+        )?)
     })
 }
 
@@ -93,7 +93,7 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
         shares.u128(),
         TotalTokens::load(&deps.storage)?.0.u128(),
         TotalShares::load(&deps.storage)?.0.u128()
-    );
+    )?;
 
     let mut queue = UnbondingQueue::may_load(
         &deps.storage,
@@ -125,6 +125,12 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
         unbonded: match time {
             None => None,
             Some(_) => Some(unbonded)
-        }
+        },
+        cooldown: UserCooldown::may_load(
+            &deps.storage,
+            account.as_str().as_bytes())?.unwrap_or(UserCooldown {
+            total: Default::default(),
+            queue: VecQueue(vec![])
+        }).queue
     })
 }
