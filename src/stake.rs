@@ -367,7 +367,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     sender: HumanAddr,
-    _from: HumanAddr,
+    from: HumanAddr,
     amount: Uint128,
     msg: Option<Binary>,
     memo: Option<String>
@@ -392,21 +392,30 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
     let symbol = ReadonlyConfig::from_storage(& deps.storage).constants()?.symbol;
     let mut messages = vec![];
     match receive_type {
-        ReceiveType::Bond => {
+        ReceiveType::Bond { useFrom } => {
+
+            let mut target = sender;
+            let mut target_canon = sender_canon;
+            if let Some(useFrom) = useFrom {
+                if useFrom {
+                    target_canon = deps.api.canonical_address(&from)?;
+                    target = from;
+                }
+            }
 
             // Update user stake
             add_balance(
                 &mut deps.storage,
                 &stake_config,
-                &sender,
-                &sender_canon,
+                &target,
+                &target_canon,
                 amount.u128()
             )?;
 
             // Store data
             store_stake(
                 &mut deps.storage,
-                &sender_canon,
+                &target_canon,
                 amount,
                 symbol,
                 memo,

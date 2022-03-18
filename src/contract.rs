@@ -167,7 +167,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
                     }
 
                     match receive_type {
-                        ReceiveType::Bond | ReceiveType::Reward => notAuthorized = true,
+                        ReceiveType::Bond{..} | ReceiveType::Reward => notAuthorized = true,
                         _ => {}
                     }
                 },
@@ -1585,7 +1585,7 @@ mod staking_tests {
             sender: HumanAddr(acc.to_string()),
             from: Default::default(),
             amount: stake,
-            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
             memo: None,
             padding: None,
         };
@@ -1632,7 +1632,7 @@ mod staking_tests {
             sender: HumanAddr("foo".to_string()),
             from: Default::default(),
             amount: Uint128(100 * 10u128.pow(8)),
-            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
             memo: None,
             padding: None,
         };
@@ -2919,7 +2919,7 @@ mod staking_tests {
             sender: HumanAddr("foo".to_string()),
             from: Default::default(),
             amount: Uint128(100 * 10u128.pow(8)),
-            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
             memo: None,
             padding: None,
         };
@@ -2998,7 +2998,7 @@ mod staking_tests {
             sender: HumanAddr("foo".to_string()),
             from: Default::default(),
             amount: Uint128(100 * 10u128.pow(8)),
-            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
             memo: None,
             padding: None,
         };
@@ -3069,7 +3069,7 @@ mod snip20_tests {
             sender: HumanAddr(acc.to_string()),
             from: Default::default(),
             amount: stake,
-            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
             memo: None,
             padding: None,
         };
@@ -3343,7 +3343,7 @@ mod snip20_tests {
             sender: HumanAddr("giannis".to_string()),
             from: Default::default(),
             amount: Uint128(1),
-            msg: Some(to_binary(&ReceiveType::Bond).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
             memo: None,
             padding: None,
         };
