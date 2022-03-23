@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use cosmwasm_std::{Api, Binary, CosmosMsg, Env, Extern, HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, to_binary, Uint128};
 use secret_toolkit::utils::HandleCallback;
 use shade_protocol::shd_staking::stake::VecQueue;
-use shade_protocol::storage::BucketStorage;
+use shade_protocol::utils::storage::BucketStorage;
 use crate::contract::check_if_admin;
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;

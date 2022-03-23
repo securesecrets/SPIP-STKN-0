@@ -1,7 +1,7 @@
 use std::collections::BinaryHeap;
 use cosmwasm_std::{Api, Binary, Extern, HumanAddr, Querier, StdResult, Storage, to_binary, Uint128};
 use shade_protocol::shd_staking::stake::{StakeConfig, VecQueue};
-use shade_protocol::storage::{BucketStorage, SingletonStorage};
+use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
 use crate::msg::QueryAnswer;
 use crate::stake::{calculate_rewards, shares_per_token};
 use crate::state::{ReadonlyBalances};
