@@ -1,6 +1,6 @@
 use cosmwasm_std::{Api, Binary, Env, Extern, HandleResponse, HumanAddr, Querier, StdResult, Storage, to_binary};
 use crate::state_staking::{Distributors, DistributorsEnabled};
-use shade_protocol::storage::SingletonStorage;
+use shade_protocol::utils::storage::SingletonStorage;
 use crate::contract::check_if_admin;
 use crate::msg::{HandleAnswer, QueryAnswer};
 use crate::msg::ResponseStatus::Success;

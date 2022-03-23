@@ -19,7 +19,7 @@ use secret_toolkit::snip20::{register_receive_msg, send_msg, token_info_query};
 use shade_protocol::shd_staking::ReceiveType;
 use shade_protocol::shd_staking::stake::{Cooldown, StakeConfig, VecQueue};
 use crate::state_staking::{DailyUnbondingQueue, Distributors, DistributorsEnabled, TotalShares, TotalTokens, TotalUnbonding, UnsentStakedTokens, UserCooldown, UserShares};
-use shade_protocol::storage::{BucketStorage, SingletonStorage};
+use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
 use crate::distributors::{get_distributor, try_add_distributors, try_set_distributors, try_set_distributors_status};
 use crate::expose_balance::{try_expose_balance, try_expose_balance_with_cooldown};
 use crate::stake::{claim_rewards, remove_from_cooldown, shares_per_token, try_claim_rewards, try_claim_unbond, try_receive, try_stake_rewards, try_unbond, try_update_stake_config};
@@ -114,13 +114,20 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     if let Some(addr) = msg.treasury {
         if let Some(code_hash) = msg.treasury_code_hash {
             messages.push(register_receive_msg(
-                env.contract_code_hash,
+                env.contract_code_hash.clone(),
                 None,
                 256,
                 code_hash,
                 addr)?);
         }
     }
+
+    messages.push(register_receive_msg(
+        env.contract_code_hash,
+        None,
+        256,
+        msg.staked_token.code_hash,
+        msg.staked_token.address)?);
 
     Ok(InitResponse{
         messages,
@@ -3271,7 +3278,6 @@ mod snip20_tests {
             pwd: "pwd",
             stake: Uint128(5000)
         }]);
-        assert_eq!(init_result.unwrap(), InitResponse::default());
 
         let config = ReadonlyConfig::from_storage(&deps.storage);
         let constants = config.constants().unwrap();
@@ -3302,7 +3308,6 @@ mod snip20_tests {
             true,
             0,
         );
-        assert_eq!(init_result.unwrap(), InitResponse::default());
 
         let config = ReadonlyConfig::from_storage(&deps.storage);
         let constants = config.constants().unwrap();

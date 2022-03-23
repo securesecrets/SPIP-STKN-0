@@ -3,7 +3,7 @@ use cosmwasm_std::{HumanAddr, Uint128};
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use shade_protocol::shd_staking::stake::{Cooldown, DailyUnbonding, Unbonding, VecQueue};
-use shade_protocol::storage::{BucketStorage, SingletonStorage};
+use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
 
 // used to determine what each token is worth to calculate rewards
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

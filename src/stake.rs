@@ -4,7 +4,7 @@ use ethnum::u256;
 use secret_toolkit::snip20::{register_receive_msg, send_msg};
 use shade_protocol::shd_staking::ReceiveType;
 use shade_protocol::shd_staking::stake::{DailyUnbonding, StakeConfig, Unbonding, VecQueue};
-use shade_protocol::storage::{BucketStorage, SingletonStorage};
+use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
 use shade_protocol::utils::asset::Contract;
 use crate::contract::{check_if_admin, try_mint_impl};
 use crate::msg::HandleAnswer;
