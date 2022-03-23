@@ -45,7 +45,6 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         ));
     }
 
-    let init_config = msg.config();
     let admin = msg.admin.unwrap_or(env.message.sender);
     let canon_admin = deps.api.canonical_address(&admin)?;
 
@@ -74,7 +73,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         decimals: staked_token_decimals,
         admin: admin.clone(),
         prng_seed: prng_seed_hashed.to_vec(),
-        total_supply_is_public: init_config.public_total_supply(),
+        total_supply_is_public: msg.public_total_supply,
         contract_address: env.contract.address,
     })?;
     config.set_total_supply(total_supply);
@@ -109,19 +108,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 
     UnsentStakedTokens(Uint128::zero()).save(&mut deps.storage)?;
 
-    // Register receive if necessary
     let mut messages = vec![];
-    if let Some(addr) = msg.treasury {
-        if let Some(code_hash) = msg.treasury_code_hash {
-            messages.push(register_receive_msg(
-                env.contract_code_hash.clone(),
-                None,
-                256,
-                code_hash,
-                addr)?);
-        }
-    }
-
     messages.push(register_receive_msg(
         env.contract_code_hash,
         None,
@@ -1515,7 +1502,6 @@ fn is_valid_symbol(symbol: &str) -> bool {
 mod staking_tests {
     use super::*;
     use crate::msg::ResponseStatus;
-    use crate::msg::{InitConfig};
     use cosmwasm_std::testing::*;
     use cosmwasm_std::{from_binary, BlockInfo, ContractInfo, MessageInfo, QueryResponse, WasmMsg};
     use std::any::Any;
@@ -1537,14 +1523,13 @@ mod staking_tests {
             decimals: Some(8),
             share_decimals: 18,
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: None,
+            public_total_supply: true,
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
                 code_hash: "hash".to_string()
             },
             treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
             limit_transfer: true,
             distributors: Some(vec![HumanAddr("distributor".to_string())])
         };
@@ -3051,7 +3036,6 @@ mod staking_tests {
 mod snip20_tests {
     use super::*;
     use crate::msg::ResponseStatus;
-    use crate::msg::{InitConfig};
     use cosmwasm_std::testing::*;
     use cosmwasm_std::{from_binary, BlockInfo, ContractInfo, MessageInfo, QueryResponse, WasmMsg};
     use std::any::Any;
@@ -3115,14 +3099,13 @@ mod snip20_tests {
             decimals: Some(8),
             share_decimals: 18,
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: None,
+            public_total_supply: false,
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
                 code_hash: "hash".to_string()
             },
             treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
             limit_transfer: false,
             distributors: None
         };
@@ -3138,10 +3121,6 @@ mod snip20_tests {
 
     fn init_helper_with_config(
         initial_balances: Vec<InitBalance>,
-        enable_deposit: bool,
-        enable_redeem: bool,
-        enable_mint: bool,
-        enable_burn: bool,
         contract_bal: u128,
     ) -> (
         StdResult<InitResponse>,
@@ -3156,18 +3135,6 @@ mod snip20_tests {
         );
 
         let env = mock_env("instantiator", &[]);
-        let init_config: InitConfig = from_binary(&Binary::from(
-            format!(
-                "{{\"public_total_supply\":false,
-            \"enable_deposit\":{},
-            \"enable_redeem\":{},
-            \"enable_mint\":{},
-            \"enable_burn\":{}}}",
-                enable_deposit, enable_redeem, enable_mint, enable_burn
-            )
-            .as_bytes(),
-        ))
-        .unwrap();
         let init_msg = InitMsg {
             name: "sec-sec".to_string(),
             admin: Some(HumanAddr("admin".to_string())),
@@ -3175,14 +3142,13 @@ mod snip20_tests {
             decimals: Some(8),
             share_decimals: 18,
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: Some(init_config),
+            public_total_supply: false,
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
                 code_hash: "hash".to_string()
             },
             treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
             limit_transfer: false,
             distributors: None
         };
@@ -3302,10 +3268,6 @@ mod snip20_tests {
                 pwd: "pwd",
                 stake: Uint128(5000)
             }],
-            true,
-            true,
-            true,
-            true,
             0,
         );
 
@@ -4094,10 +4056,6 @@ mod snip20_tests {
             pwd: "pwd",
             stake: Uint128(5000)
         }],
-            false,
-            false,
-            true,
-            false,
             0,
         );
         assert!(
@@ -4228,10 +4186,6 @@ mod snip20_tests {
         let init_admin = HumanAddr("admin".to_string());
         let init_symbol = "SECSEC".to_string();
         let init_decimals = 8;
-        let init_config: InitConfig = from_binary(&Binary::from(
-            r#"{ "public_total_supply": true }"#.as_bytes(),
-        ))
-        .unwrap();
         let init_supply = Uint128(5000);
 
         let mut deps = mock_dependencies(20, &[]);
@@ -4243,14 +4197,13 @@ mod snip20_tests {
             decimals: Some(init_decimals.clone()),
             share_decimals: 18,
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: Some(init_config),
+            public_total_supply: true,
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
                 code_hash: "hash".to_string()
             },
             treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
             limit_transfer: true,
             distributors: None
         };
@@ -4293,16 +4246,6 @@ mod snip20_tests {
         let init_admin = HumanAddr("admin".to_string());
         let init_symbol = "SECSEC".to_string();
         let init_decimals = 8;
-        let init_config: InitConfig = from_binary(&Binary::from(
-            format!(
-                "{{\"public_total_supply\":{},
-            \"enable_mint\":{},
-            \"enable_burn\":{}}}",
-                true, true, false
-            )
-            .as_bytes(),
-        ))
-        .unwrap();
 
         let init_supply = Uint128(5000);
 
@@ -4315,14 +4258,13 @@ mod snip20_tests {
             decimals: Some(init_decimals.clone()),
             share_decimals: 18,
             prng_seed: Binary::from("lolz fun yay".as_bytes()),
-            config: Some(init_config),
+            public_total_supply: true,
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
                 code_hash: "hash".to_string()
             },
             treasury: Some(HumanAddr("treasury".to_string())),
-            treasury_code_hash: None,
             limit_transfer: true,
             distributors: None
         };
@@ -4622,10 +4564,6 @@ mod snip20_tests {
                 pwd: "pwd",
                 stake: Uint128(10000)
             }],
-            true,
-            true,
-            false,
-            false,
             0,
         );
         assert!(

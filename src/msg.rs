@@ -20,40 +20,16 @@ pub struct InitMsg {
     pub decimals: Option<u8>,
     pub share_decimals: u8,
     pub prng_seed: Binary,
-    pub config: Option<InitConfig>,
+    pub public_total_supply: bool,
 
     // Stake
     pub unbond_time: u64,
     pub staked_token: Contract,
     pub treasury: Option<HumanAddr>,
-    pub treasury_code_hash: Option<String>,
 
     // Distributors
     pub limit_transfer: bool,
     pub distributors: Option<Vec<HumanAddr>>
-}
-
-impl InitMsg {
-    pub fn config(&self) -> InitConfig {
-        self.config.clone().unwrap_or_default()
-    }
-}
-
-/// This type represents optional configuration values which can be overridden.
-/// All values are optional and have defaults which are more private by default,
-/// but can be overridden if necessary
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Default, Debug)]
-#[serde(rename_all = "snake_case")]
-pub struct InitConfig {
-    /// Indicates whether the total supply is public or should be kept secret.
-    /// default: False
-    pub public_total_supply: Option<bool>,
-}
-
-impl InitConfig {
-    pub fn public_total_supply(&self) -> bool {
-        self.public_total_supply.unwrap_or(false)
-    }
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
