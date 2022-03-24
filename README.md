@@ -38,7 +38,7 @@ Allows for Snip20 liquid staking
 # Sections
 
 ## Init
-##### Request
+### Request
 | Name                | Type         | Description                                                                | optional |
 |---------------------|--------------|----------------------------------------------------------------------------|----------|
 | name                | string       | Name of the staked token                                                   | No       |
@@ -58,9 +58,9 @@ Allows for Snip20 liquid staking
 
 ### Messages
 
-#### UpdateStakeConfig
+### UpdateStakeConfig
 Updated the staked tokens configuration file
-##### Request
+#### Request
 | Name             | Type   | Description                           | optional |
 |------------------|--------|---------------------------------------|----------|
 | unbond_time      | u64    | Changes the unbonding time            | yes      |
@@ -68,34 +68,34 @@ Updated the staked tokens configuration file
 | treasury         | string | Replaces the treasury address         | yes      |
 | padding          | string | Used to pad messages                  | yes      |
 
-#### SetDistributorsStatus
+### SetDistributorsStatus
 Sets if distributor limits are enabled or not
-##### Request
+#### Request
 | Name    | Type   | Description                  | optional |
 |---------|--------|------------------------------|----------|
 | enables | bool   | Sets the distribution status | no       |
 | padding | string | Used to pad messages         | yes      |
 
-#### AddDistributors
+### AddDistributors
 Adds distributors to the list of allowed addresses
-##### Request
+#### Request
 | Name         | Type         | Description                                    | optional |
 |--------------|--------------|------------------------------------------------|----------|
 | distributors | string array | Adds the addresses to the allowed distributors | no       |
 | padding      | string       | Used to pad messages                           | yes      |
 
-#### SetDistributors
+### SetDistributors
 Sets distributors to the list of allowed addresses
-##### Request
+#### Request
 | Name         | Type         | Description                                         | optional |
 |--------------|--------------|-----------------------------------------------------|----------|
 | distributors | string array | Sets the new addresses for the allowed distributors | no       |
 | padding      | string       | Used to pad messages                                | yes      |
 
-#### SetContractStatus
+### SetContractStatus
 Can limit certain contract interactions for maintenance and security purposes. Status levels are NormalRun,
 StopBonding, StopAllButUnbond, StopAll
-##### Request
+#### Request
 | Name    | Type                | Description                  | optional |
 |---------|---------------------|------------------------------|----------|
 | level   | ContractStatusLevel | Stops certain contract logic | no       |
@@ -105,9 +105,9 @@ StopBonding, StopAllButUnbond, StopAll
 
 ### Messages
 
-#### Receive
+### Receive
 Snip20 function used to interact with a contract that just got tokens sent to it
-##### Request
+#### Request
 | Name    | Type   | Description                                          | optional |
 |---------|--------|------------------------------------------------------|----------|
 | sender  | string | The send msg signer                                  | no       |
@@ -117,46 +117,46 @@ Snip20 function used to interact with a contract that just got tokens sent to it
 | memo    | string | Additional written context for the tx                | yes      |
 | padding | string | Used to pad messages                                 | yes      |
 
-###### Msg Type
-####### Bond
+##### Msg Type
+###### Bond
 Used for bonding the send tokens, can add a `useFrom` tag to specify the usage of `from` instead of `sender`
-####### Rewards
+###### Rewards
 Adds the tokens as bonding rewards
-####### Unbond
+###### Unbond
 Adds the tokens as unbonding amounts
 
-#### Unbond
+### Unbond
 Unbonds the given amount, must be less or equal than the users staked amount
-##### Request
+#### Request
 | Name    | Type   | Description          | optional |
 |---------|--------|----------------------|----------|
 | amount  | strung | amount to unbond     | no       |
 | padding | string | Used to pad messages | yes      |
 
-#### ClaimUnbond
+### ClaimUnbond
 Claims the unbonded amount
-##### Request
+#### Request
 | Name    | Type   | Description          | optional |
 |---------|--------|----------------------|----------|
 | padding | string | Used to pad messages | yes      |
 
-#### ClaimRewards
+### ClaimRewards
 Claims the available rewards
-##### Request
+#### Request
 | Name    | Type   | Description          | optional |
 |---------|--------|----------------------|----------|
 | padding | string | Used to pad messages | yes      |
 
-#### StakeRewards
+### StakeRewards
 Claims and stakes available rewards
-##### Request
+#### Request
 | Name    | Type   | Description          | optional |
 |---------|--------|----------------------|----------|
 | padding | string | Used to pad messages | yes      |
 
-#### ExposeBalance
+### ExposeBalance
 Exposes the users current staked token balance
-##### Request
+#### Request
 | Name      | Type   | Description                                                | optional |
 |-----------|--------|------------------------------------------------------------|----------|
 | recipient | string | Where the token amount will be shown                       | no       |
@@ -165,9 +165,9 @@ Exposes the users current staked token balance
 | memo      | string | Additional written context for the tx                      | yes      |
 | padding   | string | Used to pad messages                                       | yes      |
 
-#### ExposeBalanceWithCooldown
+### ExposeBalanceWithCooldown
 Exposes the users staked balance that is not in cooldown (useful for voting)
-##### Request
+#### Request
 | Name      | Type   | Description                                                | optional |
 |-----------|--------|------------------------------------------------------------|----------|
 | recipient | string | Where the token amount will be shown                       | no       |
@@ -175,3 +175,146 @@ Exposes the users staked balance that is not in cooldown (useful for voting)
 | msg       | string | Base64 encoded msg that will be forwarded to the recipient | yes      |
 | memo      | string | Additional written context for the tx                      | yes      |
 | padding   | string | Used to pad messages                                       | yes      |
+
+### Queries
+
+### StakeConfig
+Returns the current configuration for stake parameters
+
+#### Response
+```json
+{
+  "staked_config": {
+    "config": {
+      "unbond_time": 0,
+      "staked_token": {
+        "address": "",
+        "code_hash": ""
+      },
+      "decimal_difference": 0,
+      "treasury": ""
+    }
+  }
+}
+```
+
+### TotalStaked
+Shows how much is currently staked in the contract
+
+#### Response
+
+```json
+{
+  "total_staked": {
+    "tokens": "",
+    "shares": ""
+  }
+}
+```
+
+### StakeRate
+How many shares the smallest denomination of a staked token is worth
+
+#### Response
+```json
+{
+  "stake_rate": {
+    "shares": ""
+  }
+}
+```
+
+### Unbonding
+How many tokens are currently unbonding
+
+#### Response
+```json
+{
+  "unbonding": {
+    "total": ""
+  }
+}
+```
+
+### Unfunded
+How many tokens are currently unfunded
+#### Request
+| Name  | Type | Description                   | optional |
+|-------|------|-------------------------------|----------|
+| start | u64  | Start day of unfunded queue   | no       |
+| total | u64  | How many queue items to query | no       |
+
+#### Response
+```json
+{
+  "unfunded": {
+    "total": ""
+  }
+}
+```
+
+### Staked
+A users staked balance
+#### Request
+| Name    | Type   | Description                                             | optional |
+|---------|--------|---------------------------------------------------------|----------|
+| address | string | Which user to query                                     | no       |
+| key     | string | Viewing key of that user                                | no       |
+| time    | u64    | Current time, used for more context on unbonded balance | yes      |
+
+#### Response
+```json
+{
+  "staked": {
+    "tokens": "",
+    "shares": "",
+    "pending_rewards": "",
+    "unbonding": "",
+    "unbonded": "",
+    "cooldown": ""
+  }
+}
+```
+
+### Distributors
+Distributor lockup state and current allowed distributors. If lockup is disabled then nothing is returned
+
+#### Response
+```json
+{
+  "distributors": {
+    "distributors": ""
+  }
+}
+```
+
+### WithPermit
+Query user stake with permit instead of a viewing key
+#### Request
+| Name   | Type            | Description                 | optional |
+|--------|-----------------|-----------------------------|----------|
+| permit | Permit          | A users query permit        | no       |
+| query  | QueryWithPermit | Query used with that permit | no       |
+
+##### Query With Permit
+```json
+{
+  "staked": {
+    "time": 0
+  }
+}
+```
+
+#### Response
+```json
+{
+  "staked": {
+    "tokens": "",
+    "shares": "",
+    "pending_rewards": "",
+    "unbonding": "",
+    "unbonded": "",
+    "cooldown": ""
+  }
+}
+```
