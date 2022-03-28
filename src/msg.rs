@@ -330,7 +330,6 @@ pub enum QueryMsg {
     TokenInfo {},
     TokenConfig {},
     ContractStatus {},
-    ExchangeRate {},
     Allowance {
         owner: HumanAddr,
         spender: HumanAddr,

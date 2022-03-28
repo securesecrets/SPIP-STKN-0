@@ -1,10 +1,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::contract::check_if_admin;
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
-use crate::state::{get_receiver_hash, Balances, Config};
+use crate::state::{get_receiver_hash, Balances};
 use crate::state_staking::UserCooldown;
 use cosmwasm_std::{
     to_binary, Api, Binary, CosmosMsg, Env, Extern, HandleResponse, HumanAddr, Querier, StdError,

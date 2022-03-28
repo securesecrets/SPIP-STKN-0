@@ -1,7 +1,7 @@
-use crate::contract::{check_if_admin, try_mint_impl};
+use crate::contract::check_if_admin;
 use crate::msg::HandleAnswer;
 use crate::msg::ResponseStatus::Success;
-use crate::state::{Balances, Config, Constants, ReadonlyConfig};
+use crate::state::{Balances, Config, ReadonlyConfig};
 use crate::state_staking::{
     DailyUnbondingQueue, TotalShares, TotalTokens, TotalUnbonding, UnbondingQueue,
     UnsentStakedTokens, UserCooldown, UserShares,
@@ -11,16 +11,14 @@ use crate::transaction_history::{
     store_unbond,
 };
 use cosmwasm_std::{
-    debug_print, from_binary, to_binary, Api, Binary, CanonicalAddr, Decimal, Env, Extern,
+    from_binary, to_binary, Api, Binary, CanonicalAddr, Decimal, Env, Extern,
     HandleResponse, HumanAddr, Querier, StdError, StdResult, Storage, Uint128,
 };
 use ethnum::u256;
-use secret_toolkit::snip20::{register_receive_msg, send_msg};
+use secret_toolkit::snip20::send_msg;
 use shade_protocol::shd_staking::stake::{DailyUnbonding, StakeConfig, Unbonding, VecQueue};
 use shade_protocol::shd_staking::ReceiveType;
-use shade_protocol::utils::asset::Contract;
 use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
-use std::collections::BinaryHeap;
 
 //TODO: set errors
 
@@ -31,7 +29,7 @@ pub fn try_update_stake_config<S: Storage, A: Api, Q: Querier>(
     disable_treasury: bool,
     treasury: Option<HumanAddr>,
 ) -> StdResult<HandleResponse> {
-    let mut config = Config::from_storage(&mut deps.storage);
+    let config = Config::from_storage(&mut deps.storage);
 
     check_if_admin(&config, &env.message.sender)?;
 
@@ -84,10 +82,6 @@ fn round_date(date: u64) -> u64 {
     date - (date % DAY)
 }
 
-pub fn round_up_date(date: u64) -> u64 {
-    round_date(date) + DAY
-}
-
 ///
 /// Updates total states to reflect balance changes
 ///
@@ -121,7 +115,7 @@ fn add_balance<S: Storage>(
     // Update total staked
     // We do this before reaching shares to get overflows out of the way
     if let Some(total_staked) = total_tokens.0.u128().checked_add(amount) {
-        TotalTokens(Uint128(total_staked)).save(storage);
+        TotalTokens(Uint128(total_staked)).save(storage)?;
     } else {
         return Err(StdError::generic_err("Total staked tokens overflow"));
     }
@@ -130,7 +124,7 @@ fn add_balance<S: Storage>(
 
     // Calculate shares per token supplied
     let shares = Uint128(shares_per_token(
-        &stake_config,
+        stake_config,
         &amount,
         &total_tokens.0.u128(),
         &total_shares.0.u128(),
@@ -199,7 +193,7 @@ fn remove_balance<S: Storage>(
     time: u64,
 ) -> StdResult<()> {
     // Return insufficient funds
-    let mut user_shares =
+    let user_shares =
         UserShares::may_load(storage, account.as_str().as_bytes())?.expect("No funds");
 
     // Get total supplied tokens
@@ -208,7 +202,7 @@ fn remove_balance<S: Storage>(
 
     // Calculate shares per token supplied
     let shares = shares_per_token(
-        &stake_config,
+        stake_config,
         &amount,
         &total_tokens.0.u128(),
         &total_shares.0.u128(),
@@ -233,7 +227,7 @@ fn remove_balance<S: Storage>(
     // Load balance
     let mut balances = Balances::from_storage(storage);
     let mut account_balance = balances.balance(account_cannon);
-    let account_tokens = account_balance.clone();
+    let account_tokens = account_balance;
 
     if let Some(new_balance) = account_balance.checked_sub(amount) {
         account_balance = new_balance;
@@ -259,7 +253,7 @@ pub fn claim_rewards<S: Storage>(
     sender: &HumanAddr,
     sender_canon: &CanonicalAddr,
 ) -> StdResult<u128> {
-    let mut user_shares =
+    let user_shares =
         UserShares::may_load(storage, sender.as_str().as_bytes())?.expect("No funds");
 
     let user_balance = Balances::from_storage(storage).balance(sender_canon);
@@ -402,8 +396,8 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
         ReceiveType::Bond { useFrom } => {
             let mut target = sender;
             let mut target_canon = sender_canon;
-            if let Some(useFrom) = useFrom {
-                if useFrom {
+            if let Some(use_from) = useFrom {
+                if use_from {
                     target_canon = deps.api.canonical_address(&from)?;
                     target = from;
                 }
@@ -484,7 +478,7 @@ pub fn try_receive<S: Storage, A: Api, Q: Querier>(
             if remaining_amount > Uint128::zero() {
                 messages.push(send_msg(
                     sender,
-                    remaining_amount.clone(),
+                    remaining_amount,
                     None,
                     None,
                     None,
@@ -559,7 +553,7 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
         env.block.time,
     )?;
 
-    let mut total_unbonding = TotalUnbonding::load(&mut deps.storage)?;
+    let mut total_unbonding = TotalUnbonding::load(&deps.storage)?;
     total_unbonding.0 += amount;
     total_unbonding.save(&mut deps.storage)?;
 
@@ -569,7 +563,7 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     daily_unbond_queue.0.push(&DailyUnbonding {
         unbonding: amount,
         funded: Default::default(),
-        release: round_date(&env.block.time + &stake_config.unbond_time),
+        release: round_date(env.block.time + stake_config.unbond_time),
     });
 
     daily_unbond_queue.save(&mut deps.storage)?;
@@ -581,7 +575,7 @@ pub fn try_unbond<S: Storage, A: Api, Q: Querier>(
     // Add unbonding to user queue
     unbond_queue.0.push(&Unbonding {
         amount,
-        release: &env.block.time + stake_config.unbond_time,
+        release: env.block.time + stake_config.unbond_time,
     });
 
     unbond_queue.save(&mut deps.storage, sender.as_str().as_bytes())?;
@@ -637,7 +631,7 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
 
     let stake_config = StakeConfig::load(&deps.storage)?;
 
-    let mut totalUnbonding = TotalUnbonding::load(&mut deps.storage)?;
+    let mut total_unbonding = TotalUnbonding::load(&deps.storage)?;
 
     // Instead of iterating over it we just look at its smallest value (first in queue)
     let daily_unbond_queue = DailyUnbondingQueue::load(&deps.storage)?.0;
@@ -672,8 +666,8 @@ pub fn try_claim_unbond<S: Storage, A: Api, Q: Querier>(
     }
 
     unbond_queue.save(&mut deps.storage, sender.as_str().as_bytes())?;
-    totalUnbonding.0 = (totalUnbonding.0 - total)?;
-    totalUnbonding.save(&mut deps.storage)?;
+    total_unbonding.0 = (total_unbonding.0 - total)?;
+    total_unbonding.save(&mut deps.storage)?;
 
     let symbol = ReadonlyConfig::from_storage(&deps.storage)
         .constants()?
@@ -784,8 +778,8 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
     add_balance(
         &mut deps.storage,
         &stake_config,
-        &sender,
-        &sender_canon,
+        sender,
+        sender_canon,
         claim.u128(),
     )?;
 
@@ -793,7 +787,7 @@ pub fn try_stake_rewards<S: Storage, A: Api, Q: Querier>(
     // Store data
     store_stake(
         &mut deps.storage,
-        &sender_canon,
+        sender_canon,
         claim,
         symbol,
         None,

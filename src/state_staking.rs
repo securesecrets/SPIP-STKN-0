@@ -3,7 +3,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use shade_protocol::shd_staking::stake::{Cooldown, DailyUnbonding, Unbonding, VecQueue};
 use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
-use std::collections::BinaryHeap;
 
 // used to determine what each token is worth to calculate rewards
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

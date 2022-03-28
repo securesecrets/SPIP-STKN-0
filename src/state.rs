@@ -2,12 +2,9 @@ use std::any::type_name;
 use std::convert::TryFrom;
 
 use cosmwasm_std::{
-    CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage, Uint128,
+    CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage,
 };
-use cosmwasm_storage::{
-    bucket, bucket_read, singleton, singleton_read, Bucket, PrefixedStorage, ReadonlyBucket,
-    ReadonlyPrefixedStorage, ReadonlySingleton, Singleton,
-};
+use cosmwasm_storage::{PrefixedStorage, ReadonlyPrefixedStorage};
 
 use secret_toolkit::storage::{TypedStore, TypedStoreMut};
 
@@ -17,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use crate::msg::{status_level_to_u8, u8_to_status_level, ContractStatusLevel};
 use crate::viewing_key::ViewingKey;
 use serde::de::DeserializeOwned;
-use shade_protocol::shd_staking::stake::StakeConfig;
 
 // Snip20
 pub static CONFIG_KEY: &[u8] = b"config";
@@ -91,7 +87,7 @@ fn ser_bin_data<T: Serialize>(obj: &T) -> StdResult<Vec<u8>> {
 }
 
 fn deser_bin_data<T: DeserializeOwned>(data: &[u8]) -> StdResult<T> {
-    bincode2::deserialize::<T>(&data).map_err(|e| StdError::serialize_err(type_name::<T>(), e))
+    bincode2::deserialize::<T>(data).map_err(|e| StdError::serialize_err(type_name::<T>(), e))
 }
 
 fn set_bin_data<T: Serialize, S: Storage>(storage: &mut S, key: &[u8], data: &T) -> StdResult<()> {

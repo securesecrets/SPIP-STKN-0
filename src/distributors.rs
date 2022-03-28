@@ -22,7 +22,7 @@ pub fn try_set_distributors_status<S: Storage, A: Api, Q: Querier>(
     env: Env,
     enabled: bool,
 ) -> StdResult<HandleResponse> {
-    let mut config = Config::from_storage(&mut deps.storage);
+    let config = Config::from_storage(&mut deps.storage);
 
     check_if_admin(&config, &env.message.sender)?;
 
@@ -42,11 +42,11 @@ pub fn try_add_distributors<S: Storage, A: Api, Q: Querier>(
     env: Env,
     new_distributors: Vec<HumanAddr>,
 ) -> StdResult<HandleResponse> {
-    let mut config = Config::from_storage(&mut deps.storage);
+    let config = Config::from_storage(&mut deps.storage);
 
     check_if_admin(&config, &env.message.sender)?;
 
-    let mut distributors = Distributors::load(&mut deps.storage)?;
+    let mut distributors = Distributors::load(&deps.storage)?;
     distributors.0.extend(new_distributors);
     distributors.save(&mut deps.storage)?;
 
@@ -64,7 +64,7 @@ pub fn try_set_distributors<S: Storage, A: Api, Q: Querier>(
     env: Env,
     distributors: Vec<HumanAddr>,
 ) -> StdResult<HandleResponse> {
-    let mut config = Config::from_storage(&mut deps.storage);
+    let config = Config::from_storage(&mut deps.storage);
 
     check_if_admin(&config, &env.message.sender)?;
 

@@ -1,12 +1,10 @@
 /// This contract implements SNIP-20 standard:
 /// https://github.com/SecretFoundation/SNIPs/blob/master/SNIP-20.md
 use cosmwasm_std::{
-    from_binary, log, to_binary, Api, BankMsg, Binary, CanonicalAddr, Coin, CosmosMsg, Env, Extern,
+    from_binary, log, to_binary, Api, Binary, CanonicalAddr, CosmosMsg, Env, Extern,
     HandleResponse, HumanAddr, InitResponse, Querier, QueryResult, ReadonlyStorage, StdError,
     StdResult, Storage, Uint128,
 };
-use std::collections::BinaryHeap;
-
 use crate::distributors::{
     get_distributor, try_add_distributors, try_set_distributors, try_set_distributors_status,
 };
@@ -31,7 +29,7 @@ use crate::state_staking::{
     TotalUnbonding, UnsentStakedTokens, UserCooldown, UserShares,
 };
 use crate::transaction_history::{
-    get_transfers, get_txs, store_burn, store_claim_reward, store_mint, store_transfer,
+    get_transfers, get_txs, store_claim_reward, store_mint, store_transfer,
 };
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 use crate::{batch, distributors, stake_queries};
@@ -64,9 +62,8 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 
     let init_config = msg.config();
     let admin = msg.admin.unwrap_or(env.message.sender);
-    let canon_admin = deps.api.canonical_address(&admin)?;
 
-    let mut total_supply: u128 = 0;
+    let total_supply: u128 = 0;
 
     let prng_seed_hashed = sha_256(&msg.prng_seed.0);
 
@@ -89,7 +86,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         name: msg.name,
         symbol: msg.symbol,
         decimals: staked_token_decimals,
-        admin: admin.clone(),
+        admin,
         prng_seed: prng_seed_hashed.to_vec(),
         total_supply_is_public: init_config.public_total_supply(),
         contract_address: env.contract.address,
@@ -98,7 +95,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     config.set_contract_status(ContractStatusLevel::NormalRun);
 
     // Set distributors
-    Distributors(msg.distributors.unwrap_or(vec![])).save(&mut deps.storage)?;
+    Distributors(msg.distributors.unwrap_or_default()).save(&mut deps.storage)?;
     DistributorsEnabled(msg.limit_transfer).save(&mut deps.storage)?;
 
     if staked_token_decimals * 2 > msg.share_decimals {
@@ -176,7 +173,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
     match contract_status {
         ContractStatusLevel::NormalRun => {} // If it's a normal run just continue
         _ => {
-            let mut notAuthorized = false;
+            let mut not_authorized = false;
             let status_code = status_level_to_u8(contract_status);
 
             match msg.clone() {
@@ -194,42 +191,42 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
                     }
 
                     match receive_type {
-                        ReceiveType::Bond { .. } | ReceiveType::Reward => notAuthorized = true,
+                        ReceiveType::Bond { .. } | ReceiveType::Reward => not_authorized = true,
                         _ => {}
                     }
                 }
                 // Relates to bonding
                 HandleMsg::StakeRewards { .. } => {
                     if status_code > 0 {
-                        notAuthorized = true;
+                        not_authorized = true;
                     }
                 }
 
                 HandleMsg::ClaimRewards { .. } => {
                     if status_code > 1 {
-                        notAuthorized = true;
+                        not_authorized = true;
                     }
                 }
                 // If unbonding check that msg is not stop all
                 HandleMsg::Unbond { .. } => {
                     if status_code > 2 {
-                        notAuthorized = true;
+                        not_authorized = true;
                     }
                 }
                 HandleMsg::ClaimUnbond { .. } => {
                     if status_code > 2 {
-                        notAuthorized = true;
+                        not_authorized = true;
                     }
                 }
                 // All other msgs can only work if status is 1 or below
                 _ => {
                     if status_code > 1 {
-                        notAuthorized = true;
+                        not_authorized = true;
                     }
                 }
             }
 
-            if notAuthorized {
+            if not_authorized {
                 return pad_response(Err(StdError::generic_err(
                     "This contract is stopped and this action is not allowed",
                 )));
@@ -360,16 +357,15 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 
 pub fn query<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>, msg: QueryMsg) -> QueryResult {
     match msg {
-        QueryMsg::StakeConfig {} => stake_queries::stake_config(&deps),
-        QueryMsg::TotalStaked {} => stake_queries::total_staked(&deps),
-        QueryMsg::StakeRate {} => stake_queries::stake_rate(&deps),
-        QueryMsg::Unbonding {} => stake_queries::unbonding(&deps),
-        QueryMsg::Unfunded { start, total } => stake_queries::unfunded(&deps, start, total),
-        QueryMsg::Distributors {} => distributors::distributors(&deps),
+        QueryMsg::StakeConfig {} => stake_queries::stake_config(deps),
+        QueryMsg::TotalStaked {} => stake_queries::total_staked(deps),
+        QueryMsg::StakeRate {} => stake_queries::stake_rate(deps),
+        QueryMsg::Unbonding {} => stake_queries::unbonding(deps),
+        QueryMsg::Unfunded { start, total } => stake_queries::unfunded(deps, start, total),
+        QueryMsg::Distributors {} => distributors::distributors(deps),
         QueryMsg::TokenInfo {} => query_token_info(&deps.storage),
         QueryMsg::TokenConfig {} => query_token_config(&deps.storage),
         QueryMsg::ContractStatus {} => query_contract_status(&deps.storage),
-        QueryMsg::ExchangeRate {} => query_exchange_rate(&deps.storage),
         QueryMsg::WithPermit { permit, query } => permit_queries(deps, permit, query),
         _ => viewing_keys_queries(deps, msg),
     }
@@ -397,7 +393,7 @@ fn permit_queries<S: Storage, A: Api, Q: Querier>(
                 )));
             }
 
-            stake_queries::staked(&deps, account, time)
+            stake_queries::staked(deps, account, time)
         }
         QueryWithPermit::Balance {} => {
             if !permit.check_permission(&Permission::Balance) {
@@ -468,7 +464,7 @@ pub fn viewing_keys_queries<S: Storage, A: Api, Q: Querier>(
             return match msg {
                 // Base
                 QueryMsg::Staked { address, time, .. } => {
-                    stake_queries::staked(&deps, address, time)
+                    stake_queries::staked(deps, address, time)
                 }
                 QueryMsg::Balance { address, .. } => query_balance(deps, &address),
                 QueryMsg::TransferHistory {
@@ -491,14 +487,6 @@ pub fn viewing_keys_queries<S: Storage, A: Api, Q: Querier>(
 
     to_binary(&QueryAnswer::ViewingKeyError {
         msg: "Wrong viewing key for this address or viewing key not set".to_string(),
-    })
-}
-
-fn query_exchange_rate<S: ReadonlyStorage>(storage: &S) -> QueryResult {
-    // Disabled because of no deposit/redeem
-    to_binary(&QueryAnswer::ExchangeRate {
-        rate: Uint128(0),
-        denom: String::new(),
     })
 }
 
@@ -710,6 +698,7 @@ pub fn query_allowance<S: Storage, A: Api, Q: Querier>(
     to_binary(&response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     messages: &mut Vec<CosmosMsg>,
@@ -759,19 +748,19 @@ fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
 
     perform_transfer(
         &mut deps.storage,
-        &sender,
-        &sender_canon,
-        &recipient,
-        &recipient_canon,
+        sender,
+        sender_canon,
+        recipient,
+        recipient_canon,
         amount.u128(),
         time,
     )?;
 
     store_transfer(
         &mut deps.storage,
-        &sender_canon,
-        &sender_canon,
-        &recipient_canon,
+        sender_canon,
+        sender_canon,
+        recipient_canon,
         amount,
         symbol,
         memo,
@@ -792,7 +781,7 @@ fn try_transfer<S: Storage, A: Api, Q: Querier>(
     let sender_canon = deps.api.canonical_address(&sender)?;
     let recipient_canon = deps.api.canonical_address(&recipient)?;
 
-    let distributor = get_distributor(&deps)?;
+    let distributor = get_distributor(deps)?;
 
     let mut messages = vec![];
 
@@ -826,7 +815,7 @@ fn try_batch_transfer<S: Storage, A: Api, Q: Querier>(
     let sender = env.message.sender;
     let sender_canon = deps.api.canonical_address(&sender)?;
 
-    let distributor = get_distributor(&deps)?;
+    let distributor = get_distributor(deps)?;
 
     let mut messages = vec![];
 
@@ -908,7 +897,7 @@ fn try_send_impl<S: Storage, A: Api, Q: Querier>(
         deps,
         messages,
         &sender,
-        &sender_canon,
+        sender_canon,
         &recipient,
         &recipient_canon,
         amount,
@@ -946,7 +935,7 @@ fn try_send<S: Storage, A: Api, Q: Querier>(
     let sender = env.message.sender;
     let sender_canon = deps.api.canonical_address(&sender)?;
 
-    let distributor = get_distributor(&deps)?;
+    let distributor = get_distributor(deps)?;
 
     try_send_impl(
         deps,
@@ -980,7 +969,7 @@ fn try_batch_send<S: Storage, A: Api, Q: Querier>(
     let sender = env.message.sender;
     let sender_canon = deps.api.canonical_address(&sender)?;
 
-    let distributor = get_distributor(&deps)?;
+    let distributor = get_distributor(deps)?;
 
     for action in actions {
         try_send_impl(
@@ -1053,6 +1042,7 @@ fn use_allowance<S: Storage>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_transfer_from_impl<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: &Env,
@@ -1123,21 +1113,21 @@ fn try_transfer_from<S: Storage, A: Api, Q: Querier>(
     memo: Option<String>,
 ) -> StdResult<HandleResponse> {
     let spender = &env.message.sender;
-    let spender_canon = deps.api.canonical_address(&spender)?;
+    let spender_canon = deps.api.canonical_address(spender)?;
     let owner_canon = deps.api.canonical_address(owner)?;
     let recipient_canon = deps.api.canonical_address(recipient)?;
     try_transfer_from_impl(
         deps,
         env,
-        &spender,
+        spender,
         &spender_canon,
-        &owner,
+        owner,
         &owner_canon,
-        &recipient,
+        recipient,
         &recipient_canon,
         amount,
         memo,
-        &get_distributor(&deps)?,
+        &get_distributor(deps)?,
         env.block.time,
     )?;
 
@@ -1155,9 +1145,9 @@ fn try_batch_transfer_from<S: Storage, A: Api, Q: Querier>(
     actions: Vec<batch::TransferFromAction>,
 ) -> StdResult<HandleResponse> {
     let spender = &env.message.sender;
-    let spender_canon = deps.api.canonical_address(&spender)?;
+    let spender_canon = deps.api.canonical_address(spender)?;
 
-    let distributor = get_distributor(&deps)?;
+    let distributor = get_distributor(deps)?;
 
     for action in actions {
         let owner_canon = deps.api.canonical_address(&action.owner)?;
@@ -1209,15 +1199,15 @@ fn try_send_from_impl<S: Storage, A: Api, Q: Querier>(
     try_transfer_from_impl(
         deps,
         &env,
-        &spender,
-        &spender_canon,
+        spender,
+        spender_canon,
         &owner,
         &owner_canon,
         &recipient,
         &recipient_canon,
         amount,
         memo.clone(),
-        &distributors,
+        distributors,
         env.block.time,
     )?;
 
@@ -1236,6 +1226,7 @@ fn try_send_from_impl<S: Storage, A: Api, Q: Querier>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_send_from<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
@@ -1254,7 +1245,7 @@ fn try_send_from<S: Storage, A: Api, Q: Querier>(
         deps,
         env,
         &mut messages,
-        &spender,
+        spender,
         &spender_canon,
         owner,
         recipient,
@@ -1262,7 +1253,7 @@ fn try_send_from<S: Storage, A: Api, Q: Querier>(
         amount,
         memo,
         msg,
-        &get_distributor(&deps)?,
+        &get_distributor(deps)?,
     )?;
 
     let res = HandleResponse {
@@ -1282,7 +1273,7 @@ fn try_batch_send_from<S: Storage, A: Api, Q: Querier>(
     let spender_canon = deps.api.canonical_address(spender)?;
     let mut messages = vec![];
 
-    let distributor = get_distributor(&deps)?;
+    let distributor = get_distributor(deps)?;
 
     for action in actions {
         try_send_from_impl(
@@ -1411,7 +1402,7 @@ fn perform_transfer<T: Storage>(
     let mut balances = Balances::from_storage(store);
 
     let mut from_balance = balances.balance(from_canon);
-    let from_tokens = from_balance.clone();
+    let from_tokens = from_balance;
 
     if let Some(new_from_balance) = from_balance.checked_sub(amount) {
         from_balance = new_from_balance;
@@ -2983,6 +2974,7 @@ mod snip20_tests {
     use shade_protocol::shd_staking::ReceiveType;
     use shade_protocol::utils::asset::Contract;
     use std::any::Any;
+    use cosmwasm_std::Coin;
 
     // Helper functions
     #[derive(Clone)]

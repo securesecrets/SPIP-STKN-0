@@ -10,7 +10,6 @@ use cosmwasm_std::{
 };
 use shade_protocol::shd_staking::stake::{StakeConfig, VecQueue};
 use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
-use std::collections::BinaryHeap;
 
 pub fn stake_config<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>) -> StdResult<Binary> {
     to_binary(&QueryAnswer::StakedConfig {
@@ -43,7 +42,7 @@ pub fn unfunded<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<Binary> {
     let mut total_bonded = Uint128::zero();
 
-    let mut queue = DailyUnbondingQueue::load(&deps.storage)?.0;
+    let queue = DailyUnbondingQueue::load(&deps.storage)?.0;
 
     let mut count = 0;
     for item in queue.0.iter() {
@@ -85,8 +84,8 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
         TotalShares::load(&deps.storage)?.0.u128(),
     )?;
 
-    let mut queue = UnbondingQueue::may_load(&deps.storage, account.as_str().as_bytes())?
-        .unwrap_or(UnbondingQueue(VecQueue::new(vec![])));
+    let queue = UnbondingQueue::may_load(&deps.storage, account.as_str().as_bytes())?
+        .unwrap_or_else(|| UnbondingQueue(VecQueue::new(vec![])));
 
     let mut unbonding = Uint128::zero();
     let mut unbonded = Uint128::zero();
@@ -108,10 +107,7 @@ pub fn staked<S: Storage, A: Api, Q: Querier>(
         shares,
         pending_rewards: Uint128(rewards),
         unbonding,
-        unbonded: match time {
-            None => None,
-            Some(_) => Some(unbonded),
-        },
+        unbonded: time.map(|_| unbonded),
         cooldown: UserCooldown::may_load(&deps.storage, account.as_str().as_bytes())?
             .unwrap_or(UserCooldown {
                 total: Default::default(),
