@@ -1,17 +1,17 @@
 mod batch;
 pub mod contract;
+mod distributors;
+mod expose_balance;
 pub mod msg;
 mod rand;
 pub mod receiver;
+mod stake;
+mod stake_queries;
 pub mod state;
+mod state_staking;
 mod transaction_history;
 mod utils;
 mod viewing_key;
-mod stake;
-mod expose_balance;
-mod distributors;
-mod state_staking;
-mod stake_queries;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {

@@ -1,28 +1,45 @@
-use std::collections::BinaryHeap;
 /// This contract implements SNIP-20 standard:
 /// https://github.com/SecretFoundation/SNIPs/blob/master/SNIP-20.md
-use cosmwasm_std::{log, to_binary, Api, BankMsg, Binary, CanonicalAddr, Coin, CosmosMsg, Env, Extern, HandleResponse, HumanAddr, InitResponse, Querier, QueryResult, ReadonlyStorage, StdError, StdResult, Storage, Uint128, from_binary};
+use cosmwasm_std::{
+    from_binary, log, to_binary, Api, BankMsg, Binary, CanonicalAddr, Coin, CosmosMsg, Env, Extern,
+    HandleResponse, HumanAddr, InitResponse, Querier, QueryResult, ReadonlyStorage, StdError,
+    StdResult, Storage, Uint128,
+};
+use std::collections::BinaryHeap;
 
-use crate::{batch, distributors, stake_queries};
-use crate::msg::{QueryWithPermit, status_level_to_u8};
+use crate::distributors::{
+    get_distributor, try_add_distributors, try_set_distributors, try_set_distributors_status,
+};
+use crate::expose_balance::{try_expose_balance, try_expose_balance_with_cooldown};
 use crate::msg::{
     space_pad, ContractStatusLevel, HandleAnswer, HandleMsg, InitMsg, QueryAnswer, QueryMsg,
     ResponseStatus::Success,
 };
+use crate::msg::{status_level_to_u8, QueryWithPermit};
 use crate::rand::sha_256;
 use crate::receiver::Snip20ReceiveMsg;
-use crate::state::{get_receiver_hash, read_allowance, read_viewing_key, set_receiver_hash, write_allowance, write_viewing_key, Balances, Config, Constants, ReadonlyBalances, ReadonlyConfig};
-use crate::transaction_history::{get_transfers, get_txs, store_burn, store_claim_reward, store_mint, store_transfer};
+use crate::stake::{
+    claim_rewards, remove_from_cooldown, shares_per_token, try_claim_rewards, try_claim_unbond,
+    try_receive, try_stake_rewards, try_unbond, try_update_stake_config,
+};
+use crate::state::{
+    get_receiver_hash, read_allowance, read_viewing_key, set_receiver_hash, write_allowance,
+    write_viewing_key, Balances, Config, Constants, ReadonlyBalances, ReadonlyConfig,
+};
+use crate::state_staking::{
+    DailyUnbondingQueue, Distributors, DistributorsEnabled, TotalShares, TotalTokens,
+    TotalUnbonding, UnsentStakedTokens, UserCooldown, UserShares,
+};
+use crate::transaction_history::{
+    get_transfers, get_txs, store_burn, store_claim_reward, store_mint, store_transfer,
+};
 use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
+use crate::{batch, distributors, stake_queries};
 use secret_toolkit::permit::{validate, Permission, Permit, RevokedPermits};
 use secret_toolkit::snip20::{register_receive_msg, send_msg, token_info_query};
-use shade_protocol::shd_staking::ReceiveType;
 use shade_protocol::shd_staking::stake::{Cooldown, StakeConfig, VecQueue};
-use crate::state_staking::{DailyUnbondingQueue, Distributors, DistributorsEnabled, TotalShares, TotalTokens, TotalUnbonding, UnsentStakedTokens, UserCooldown, UserShares};
+use shade_protocol::shd_staking::ReceiveType;
 use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
-use crate::distributors::{get_distributor, try_add_distributors, try_set_distributors, try_set_distributors_status};
-use crate::expose_balance::{try_expose_balance, try_expose_balance_with_cooldown};
-use crate::stake::{claim_rewards, remove_from_cooldown, shares_per_token, try_claim_rewards, try_claim_unbond, try_receive, try_stake_rewards, try_unbond, try_update_stake_config};
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -57,14 +74,14 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     let staked_token_decimals: u8;
     if let Some(decimals) = msg.decimals {
         staked_token_decimals = decimals;
-    }
-    else {
+    } else {
         staked_token_decimals = token_info_query(
             &deps.querier,
             256,
             msg.staked_token.code_hash.clone(),
-            msg.staked_token.address.clone()
-        )?.decimals;
+            msg.staked_token.address.clone(),
+        )?
+        .decimals;
     }
 
     let mut config = Config::from_storage(&mut deps.storage);
@@ -86,15 +103,17 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 
     if staked_token_decimals * 2 > msg.share_decimals {
         return Err(StdError::generic_err(
-            "Share decimals must be two times greater than the token decimals"))
+            "Share decimals must be two times greater than the token decimals",
+        ));
     }
 
-    StakeConfig{
+    StakeConfig {
         unbond_time: msg.unbond_time,
         staked_token: msg.staked_token.clone(),
         decimal_difference: msg.share_decimals - staked_token_decimals,
-        treasury: msg.treasury.clone()
-    }.save(&mut deps.storage)?;
+        treasury: msg.treasury.clone(),
+    }
+    .save(&mut deps.storage)?;
 
     // Set shares state to 0
     TotalShares(Uint128::zero()).save(&mut deps.storage)?;
@@ -118,7 +137,8 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
                 None,
                 256,
                 code_hash,
-                addr)?);
+                addr,
+            )?);
         }
     }
 
@@ -127,11 +147,12 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         None,
         256,
         msg.staked_token.code_hash,
-        msg.staked_token.address)?);
+        msg.staked_token.address,
+    )?);
 
-    Ok(InitResponse{
+    Ok(InitResponse {
         messages,
-        log: vec![]
+        log: vec![],
     })
 }
 
@@ -160,47 +181,46 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 
             match msg.clone() {
                 // This is always allowed
-                HandleMsg::SetContractStatus {..} => {},
-                HandleMsg::UpdateStakeConfig {..} => {},
+                HandleMsg::SetContractStatus { .. } => {}
+                HandleMsg::UpdateStakeConfig { .. } => {}
 
                 // If receive check that msg is not bonding or reward
-                HandleMsg::Receive {msg, ..} => {
+                HandleMsg::Receive { msg, .. } => {
                     let receive_type: ReceiveType;
                     if let Some(msg) = msg {
                         receive_type = from_binary(&msg)?;
-                    }
-                    else {
-                        return Err(StdError::generic_err("No receive type supplied in message"))
+                    } else {
+                        return Err(StdError::generic_err("No receive type supplied in message"));
                     }
 
                     match receive_type {
-                        ReceiveType::Bond{..} | ReceiveType::Reward => notAuthorized = true,
+                        ReceiveType::Bond { .. } | ReceiveType::Reward => notAuthorized = true,
                         _ => {}
                     }
-                },
+                }
                 // Relates to bonding
-                HandleMsg::StakeRewards{..} => {
+                HandleMsg::StakeRewards { .. } => {
                     if status_code > 0 {
                         notAuthorized = true;
                     }
-                },
-                
-                HandleMsg::ClaimRewards {..} => {
+                }
+
+                HandleMsg::ClaimRewards { .. } => {
                     if status_code > 1 {
                         notAuthorized = true;
                     }
                 }
                 // If unbonding check that msg is not stop all
-                HandleMsg::Unbond {..} => {
+                HandleMsg::Unbond { .. } => {
                     if status_code > 2 {
                         notAuthorized = true;
                     }
-                },
-                HandleMsg::ClaimUnbond {..} => {
+                }
+                HandleMsg::ClaimUnbond { .. } => {
                     if status_code > 2 {
                         notAuthorized = true;
                     }
-                },
+                }
                 // All other msgs can only work if status is 1 or below
                 _ => {
                     if status_code > 1 {
@@ -233,19 +253,10 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
             memo,
             ..
         } => try_receive(deps, env, sender, from, amount, msg, memo),
-        HandleMsg::Unbond {
-            amount,
-            ..
-        } => try_unbond(deps, env, amount),
-        HandleMsg::ClaimUnbond {
-            ..
-        } => try_claim_unbond(deps, env),
-        HandleMsg::ClaimRewards {
-            ..
-        } => try_claim_rewards(deps, env),
-        HandleMsg::StakeRewards {
-            ..
-        } => try_stake_rewards(deps, env),
+        HandleMsg::Unbond { amount, .. } => try_unbond(deps, env, amount),
+        HandleMsg::ClaimUnbond { .. } => try_claim_unbond(deps, env),
+        HandleMsg::ClaimRewards { .. } => try_claim_rewards(deps, env),
+        HandleMsg::StakeRewards { .. } => try_stake_rewards(deps, env),
 
         // Balance
         HandleMsg::ExposeBalance {
@@ -264,18 +275,15 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
         } => try_expose_balance_with_cooldown(deps, env, recipient, code_hash, msg, memo),
 
         // Distributors
-        HandleMsg::SetDistributorsStatus {
-            enabled,
-            ..
-        } => try_set_distributors_status(deps, env, enabled),
-        HandleMsg::AddDistributors {
-            distributors,
-            ..
-        } => try_add_distributors(deps, env, distributors),
-        HandleMsg::SetDistributors {
-            distributors,
-            ..
-        } => try_set_distributors(deps, env, distributors),
+        HandleMsg::SetDistributorsStatus { enabled, .. } => {
+            try_set_distributors_status(deps, env, enabled)
+        }
+        HandleMsg::AddDistributors { distributors, .. } => {
+            try_add_distributors(deps, env, distributors)
+        }
+        HandleMsg::SetDistributors { distributors, .. } => {
+            try_set_distributors(deps, env, distributors)
+        }
 
         // Base
         HandleMsg::Transfer {
@@ -355,7 +363,7 @@ pub fn query<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>, msg: QueryM
         QueryMsg::StakeConfig {} => stake_queries::stake_config(&deps),
         QueryMsg::TotalStaked {} => stake_queries::total_staked(&deps),
         QueryMsg::StakeRate {} => stake_queries::stake_rate(&deps),
-        QueryMsg::Unbonding { } => stake_queries::unbonding(&deps),
+        QueryMsg::Unbonding {} => stake_queries::unbonding(&deps),
         QueryMsg::Unfunded { start, total } => stake_queries::unfunded(&deps, start, total),
         QueryMsg::Distributors {} => distributors::distributors(&deps),
         QueryMsg::TokenInfo {} => query_token_info(&deps.storage),
@@ -459,7 +467,9 @@ pub fn viewing_keys_queries<S: Storage, A: Api, Q: Querier>(
         } else if key.check_viewing_key(expected_key.unwrap().as_slice()) {
             return match msg {
                 // Base
-                QueryMsg::Staked { address, time, .. } => stake_queries::staked(&deps, address, time),
+                QueryMsg::Staked { address, time, .. } => {
+                    stake_queries::staked(&deps, address, time)
+                }
                 QueryMsg::Balance { address, .. } => query_balance(deps, &address),
                 QueryMsg::TransferHistory {
                     address,
@@ -712,12 +722,12 @@ fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
     block: &cosmwasm_std::BlockInfo,
 
     distributors: &Option<Vec<HumanAddr>>,
-    time: u64
+    time: u64,
 ) -> StdResult<()> {
     // Verify that this transfer is allowed
     if let Some(distributors) = distributors {
         if !distributors.contains(sender) && !distributors.contains(recipient) {
-            return Err(StdError::unauthorized())
+            return Err(StdError::unauthorized());
         }
     }
 
@@ -726,18 +736,16 @@ fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
     let stake_config = StakeConfig::load(&deps.storage)?;
     let claim = claim_rewards(&mut deps.storage, &stake_config, sender, sender_canon)?;
     if claim != 0 {
-        messages.push(
-            send_msg(
-                sender.clone(),
-                Uint128(claim),
-                None,
-                None,
-                None,
-                256,
-                stake_config.staked_token.code_hash,
-                stake_config.staked_token.address
-            )?
-        );
+        messages.push(send_msg(
+            sender.clone(),
+            Uint128(claim),
+            None,
+            None,
+            None,
+            256,
+            stake_config.staked_token.code_hash,
+            stake_config.staked_token.address,
+        )?);
 
         store_claim_reward(
             &mut deps.storage,
@@ -745,11 +753,19 @@ fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
             Uint128(claim),
             symbol.clone(),
             None,
-            block
+            block,
         )?;
     }
 
-    perform_transfer(&mut deps.storage, &sender, &sender_canon, &recipient, &recipient_canon, amount.u128(), time)?;
+    perform_transfer(
+        &mut deps.storage,
+        &sender,
+        &sender_canon,
+        &recipient,
+        &recipient_canon,
+        amount.u128(),
+        time,
+    )?;
 
     store_transfer(
         &mut deps.storage,
@@ -791,7 +807,7 @@ fn try_transfer<S: Storage, A: Api, Q: Querier>(
         memo,
         &env.block,
         &distributor,
-        env.block.time
+        env.block.time,
     )?;
 
     let res = HandleResponse {
@@ -828,7 +844,7 @@ fn try_batch_transfer<S: Storage, A: Api, Q: Querier>(
             action.memo,
             &env.block,
             &distributor,
-            env.block.time
+            env.block.time,
         )?;
     }
 
@@ -885,7 +901,7 @@ fn try_send_impl<S: Storage, A: Api, Q: Querier>(
     block: &cosmwasm_std::BlockInfo,
 
     distributors: &Option<Vec<HumanAddr>>,
-    time: u64
+    time: u64,
 ) -> StdResult<()> {
     let recipient_canon = deps.api.canonical_address(&recipient)?;
     try_transfer_impl(
@@ -899,7 +915,7 @@ fn try_send_impl<S: Storage, A: Api, Q: Querier>(
         memo.clone(),
         block,
         distributors,
-        time
+        time,
     )?;
 
     try_add_receiver_api_callback(
@@ -944,7 +960,7 @@ fn try_send<S: Storage, A: Api, Q: Querier>(
         msg,
         &env.block,
         &distributor,
-        env.block.time
+        env.block.time,
     )?;
 
     let res = HandleResponse {
@@ -979,7 +995,7 @@ fn try_batch_send<S: Storage, A: Api, Q: Querier>(
             action.msg,
             &env.block,
             &distributor,
-            env.block.time
+            env.block.time,
         )?;
     }
 
@@ -1050,23 +1066,37 @@ fn try_transfer_from_impl<S: Storage, A: Api, Q: Querier>(
     memo: Option<String>,
 
     distributors: &Option<Vec<HumanAddr>>,
-    time: u64
+    time: u64,
 ) -> StdResult<()> {
-
     // Verify that this transfer is allowed
     if let Some(distributors) = distributors {
-        if !distributors.contains(spender) &&
-            !distributors.contains(owner) &&
-            !distributors.contains(recipient){
-            return Err(StdError::unauthorized())
+        if !distributors.contains(spender)
+            && !distributors.contains(owner)
+            && !distributors.contains(recipient)
+        {
+            return Err(StdError::unauthorized());
         }
     }
 
     let raw_amount = amount.u128();
 
-    use_allowance(&mut deps.storage, env, owner_canon, spender_canon, raw_amount)?;
+    use_allowance(
+        &mut deps.storage,
+        env,
+        owner_canon,
+        spender_canon,
+        raw_amount,
+    )?;
 
-    perform_transfer(&mut deps.storage, owner, owner_canon, recipient, recipient_canon, raw_amount, time)?;
+    perform_transfer(
+        &mut deps.storage,
+        owner,
+        owner_canon,
+        recipient,
+        recipient_canon,
+        raw_amount,
+        time,
+    )?;
 
     let symbol = Config::from_storage(&mut deps.storage).constants()?.symbol;
 
@@ -1108,7 +1138,7 @@ fn try_transfer_from<S: Storage, A: Api, Q: Querier>(
         amount,
         memo,
         &get_distributor(&deps)?,
-        env.block.time
+        env.block.time,
     )?;
 
     let res = HandleResponse {
@@ -1144,7 +1174,7 @@ fn try_batch_transfer_from<S: Storage, A: Api, Q: Querier>(
             action.amount,
             action.memo,
             &distributor,
-            env.block.time
+            env.block.time,
         )?;
     }
 
@@ -1172,7 +1202,7 @@ fn try_send_from_impl<S: Storage, A: Api, Q: Querier>(
     memo: Option<String>,
     msg: Option<Binary>,
 
-    distributors: &Option<Vec<HumanAddr>>
+    distributors: &Option<Vec<HumanAddr>>,
 ) -> StdResult<()> {
     let owner_canon = deps.api.canonical_address(&owner)?;
     let recipient_canon = deps.api.canonical_address(&recipient)?;
@@ -1188,7 +1218,7 @@ fn try_send_from_impl<S: Storage, A: Api, Q: Querier>(
         amount,
         memo.clone(),
         &distributors,
-        env.block.time
+        env.block.time,
     )?;
 
     try_add_receiver_api_callback(
@@ -1232,7 +1262,7 @@ fn try_send_from<S: Storage, A: Api, Q: Querier>(
         amount,
         memo,
         msg,
-        &get_distributor(&deps)?
+        &get_distributor(&deps)?,
     )?;
 
     let res = HandleResponse {
@@ -1267,7 +1297,7 @@ fn try_batch_send_from<S: Storage, A: Api, Q: Querier>(
             action.amount,
             action.memo,
             action.msg,
-            &distributor
+            &distributor,
         )?;
     }
 
@@ -1376,7 +1406,7 @@ fn perform_transfer<T: Storage>(
     to: &HumanAddr,
     to_canon: &CanonicalAddr,
     amount: u128,
-    time: u64
+    time: u64,
 ) -> StdResult<()> {
     let mut balances = Balances::from_storage(store);
 
@@ -1411,17 +1441,17 @@ fn perform_transfer<T: Storage>(
         &config,
         &amount,
         &total_tokens.0.u128(),
-        &total_shares.0.u128())?);
+        &total_shares.0.u128(),
+    )?);
 
     // move shares from one user to another
-    let mut from_shares = UserShares::load(
-        store, from.as_str().as_bytes())?;
+    let mut from_shares = UserShares::load(store, from.as_str().as_bytes())?;
 
     from_shares.0 = (from_shares.0 - transfer_shares)?;
     from_shares.save(store, from.as_str().as_bytes())?;
 
-    let mut to_shares = UserShares::may_load(
-        store, to.as_str().as_bytes())?.unwrap_or(UserShares(Uint128::zero()));
+    let mut to_shares =
+        UserShares::may_load(store, to.as_str().as_bytes())?.unwrap_or(UserShares(Uint128::zero()));
     to_shares.0 += transfer_shares;
     to_shares.save(store, to.as_str().as_bytes())?;
 
@@ -1433,13 +1463,11 @@ fn perform_transfer<T: Storage>(
 
     // Update to cooldown
     {
-        let mut to_cooldown = UserCooldown::may_load(
-            store,
-            to.as_str().as_bytes(),
-        )?.unwrap_or(UserCooldown {
-            total: Uint128::zero(),
-            queue: VecQueue(vec![]),
-        });
+        let mut to_cooldown =
+            UserCooldown::may_load(store, to.as_str().as_bytes())?.unwrap_or(UserCooldown {
+                total: Uint128::zero(),
+                queue: VecQueue(vec![]),
+            });
         // try to remove items that have already passed
         to_cooldown.update(time);
         // add the new cooldown
@@ -1514,16 +1542,15 @@ fn is_valid_symbol(symbol: &str) -> bool {
 #[cfg(test)]
 mod staking_tests {
     use super::*;
+    use crate::msg::InitConfig;
     use crate::msg::ResponseStatus;
-    use crate::msg::{InitConfig};
     use cosmwasm_std::testing::*;
     use cosmwasm_std::{from_binary, BlockInfo, ContractInfo, MessageInfo, QueryResponse, WasmMsg};
-    use std::any::Any;
     use shade_protocol::shd_staking::ReceiveType;
     use shade_protocol::utils::asset::Contract;
+    use std::any::Any;
 
-    fn init_helper_staking(
-    ) -> (
+    fn init_helper_staking() -> (
         StdResult<InitResponse>,
         Extern<MockStorage, MockApi, MockQuerier>,
     ) {
@@ -1541,12 +1568,12 @@ mod staking_tests {
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
+                code_hash: "hash".to_string(),
             },
             treasury: Some(HumanAddr("treasury".to_string())),
             treasury_code_hash: None,
             limit_transfer: true,
-            distributors: Some(vec![HumanAddr("distributor".to_string())])
+            distributors: Some(vec![HumanAddr("distributor".to_string())]),
         };
 
         (init(&mut deps, env, init_msg), deps)
@@ -1586,38 +1613,30 @@ mod staking_tests {
         deps: &mut Extern<MockStorage, MockApi, MockQuerier>,
         acc: &str,
         pwd: &str,
-        stake: Uint128
+        stake: Uint128,
     ) {
         let handle_msg = HandleMsg::Receive {
             sender: HumanAddr(acc.to_string()),
             from: Default::default(),
             amount: stake,
-            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond { useFrom: None }).unwrap()),
             memo: None,
             padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
         let handle_msg = HandleMsg::SetViewingKey {
             key: pwd.to_string(),
             padding: None,
         };
-        let handle_result = handle(
-            deps,
-            mock_env(acc, &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(deps, mock_env(acc, &[]), handle_msg.clone());
     }
 
     fn check_staked_state(
-        deps: & Extern<MockStorage, MockApi, MockQuerier>,
+        deps: &Extern<MockStorage, MockApi, MockQuerier>,
         expected_tokens: Uint128,
-        expected_shares: Uint128
+        expected_shares: Uint128,
     ) {
         let query_balance_msg = QueryMsg::TotalStaked {};
 
@@ -1626,7 +1645,7 @@ mod staking_tests {
             QueryAnswer::TotalStaked { shares, tokens } => {
                 assert_eq!(tokens, expected_tokens);
                 assert_eq!(shares, expected_shares)
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -1639,39 +1658,27 @@ mod staking_tests {
             sender: HumanAddr("foo".to_string()),
             from: Default::default(),
             amount: Uint128(100 * 10u128.pow(8)),
-            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond { useFrom: None }).unwrap()),
             memo: None,
             padding: None,
         };
         // Bond tokens with unsupported token
-        let handle_result = handle(
-            &mut deps,
-            mock_env("not_token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("not_token", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
         let handle_msg = HandleMsg::SetViewingKey {
             key: "key".to_string(),
             padding: None,
         };
         // Bond tokens with unsupported token
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
 
         check_staked_state(
             &deps,
             Uint128(100 * 10u128.pow(8)),
-            Uint128(100 * 10u128.pow(18))
+            Uint128(100 * 10u128.pow(18)),
         );
 
         new_staked_account(&mut deps, "bar", "key", Uint128(100 * 10u128.pow(8)));
@@ -1679,25 +1686,31 @@ mod staking_tests {
         let query_balance_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_balance_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
         check_staked_state(
             &deps,
             Uint128(200 * 10u128.pow(8)),
-            Uint128(200 * 10u128.pow(18))
+            Uint128(200 * 10u128.pow(18)),
         );
     }
 
@@ -1714,35 +1727,27 @@ mod staking_tests {
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Unbonding { total } => {
                 assert_eq!(total, Uint128::zero());
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Unbond more than allowed
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(1000 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
         // Unbond
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(50 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
         // Set time for ease of prediction
         let mut env = mock_env("foo", &[]);
         env.block.time = 10;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query unbonding queue
@@ -1752,21 +1757,18 @@ mod staking_tests {
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Unbonding { total } => {
                 assert_eq!(total, Uint128(50 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Query unbonding queue
-        let query_msg = QueryMsg::Unfunded {
-            start: 0,
-            total: 1
-        };
+        let query_msg = QueryMsg::Unfunded { start: 0, total: 1 };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Unfunded { total } => {
                 assert_eq!(total, Uint128(50 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -1774,25 +1776,31 @@ mod staking_tests {
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(50 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
         check_staked_state(
             &deps,
             Uint128(50 * 10u128.pow(8)),
-            Uint128(50 * 10u128.pow(18))
+            Uint128(50 * 10u128.pow(18)),
         );
     }
 
@@ -1806,29 +1814,22 @@ mod staking_tests {
         // Unbond
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(50 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
         // Set time for ease of prediction
         let mut env = mock_env("foo", &[]);
         env.block.time = 10;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query unbonding queue
-        let query_msg = QueryMsg::Unfunded {
-            start: 0,
-            total: 1
-        };
+        let query_msg = QueryMsg::Unfunded { start: 0, total: 1 };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Unfunded { total } => {
                 assert_eq!(total, Uint128(50 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -1841,53 +1842,39 @@ mod staking_tests {
             memo: None,
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query unbonding queue
-        let query_msg = QueryMsg::Unfunded {
-            start: 0,
-            total: 1
-        };
+        let query_msg = QueryMsg::Unfunded { start: 0, total: 1 };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Unfunded { total } => {
                 assert_eq!(total, Uint128(25 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Unbond in the middle of funding
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(25 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
         // Set time for ease of prediction
         let mut env = mock_env("foo", &[]);
         env.block.time = 10;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query unbonding queue
-        let query_msg = QueryMsg::Unfunded {
-            start: 0,
-            total: 1
-        };
+        let query_msg = QueryMsg::Unfunded { start: 0, total: 1 };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Unfunded { total } => {
                 assert_eq!(total, Uint128(50 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -1900,24 +1887,17 @@ mod staking_tests {
             memo: None,
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query unbonding queue
-        let query_msg = QueryMsg::Unfunded {
-            start: 0,
-            total: 1
-        };
+        let query_msg = QueryMsg::Unfunded { start: 0, total: 1 };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Unfunded { total } => {
                 assert_eq!(total, Uint128::zero());
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -1932,16 +1912,12 @@ mod staking_tests {
         // Unbond
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(25 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
         // Set time for ease of prediction
         let mut env = mock_env("foo", &[]);
         env.block.time = 0;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Fund the unbond
@@ -1953,125 +1929,117 @@ mod staking_tests {
             memo: None,
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query user stake
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(75 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(75 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128(25 * 10u128.pow(8)));
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Try to claim when its funded but the date hasn't been reached
-        let handle_msg = HandleMsg::ClaimUnbond {
-            padding: None,
-        };
+        let handle_msg = HandleMsg::ClaimUnbond { padding: None };
         let mut env = mock_env("foo", &[]);
         env.block.time = 0;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_err());
 
         // Query user stake
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: Some(10)
+            time: Some(10),
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(75 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(75 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, Some(Uint128(25 * 10u128.pow(8))));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Claim
-        let handle_msg = HandleMsg::ClaimUnbond {
-            padding: None,
-        };
+        let handle_msg = HandleMsg::ClaimUnbond { padding: None };
         let mut env = mock_env("foo", &[]);
         env.block.time = 11;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query user stake
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: Some(10)
+            time: Some(10),
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(75 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(75 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, Some(Uint128::zero()));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Try to claim when its not funded and the date has been reached
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(25 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
         // Set time for ease of prediction
         let mut env = mock_env("foo", &[]);
         env.block.time = 0;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Claim
-        let handle_msg = HandleMsg::ClaimUnbond {
-            padding: None,
-        };
+        let handle_msg = HandleMsg::ClaimUnbond { padding: None };
         let mut env = mock_env("foo", &[]);
         env.block.time = 11;
-        let handle_result = handle(
-            &mut deps,
-            env,
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, env, handle_msg.clone());
         assert!(handle_result.is_err());
     }
 
@@ -2086,11 +2054,7 @@ mod staking_tests {
         // Claim rewards
         let handle_msg = HandleMsg::ClaimRewards { padding: None };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
         // Add rewards; foo should get 50 tkn and bar 25
@@ -2102,30 +2066,32 @@ mod staking_tests {
             memo: None,
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query user stake
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2133,19 +2099,25 @@ mod staking_tests {
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(50 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128(25 * 10u128.pow(8)));
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2153,35 +2125,37 @@ mod staking_tests {
         check_staked_state(
             &deps,
             Uint128(225 * 10u128.pow(8)),
-            Uint128(150 * 10u128.pow(18))
+            Uint128(150 * 10u128.pow(18)),
         );
 
         // Claim rewards
         let handle_msg = HandleMsg::ClaimRewards { padding: None };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
                 assert!(shares < Uint128(100 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -2201,57 +2175,61 @@ mod staking_tests {
             memo: None,
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check account to confirm it works
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
-        let handle_msg = HandleMsg::StakeRewards {padding: None};
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_msg = HandleMsg::StakeRewards { padding: None };
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(150 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -2273,30 +2251,32 @@ mod staking_tests {
             memo: None,
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Query user stake
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2304,19 +2284,25 @@ mod staking_tests {
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(50 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128(25 * 10u128.pow(8)));
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2324,37 +2310,39 @@ mod staking_tests {
         check_staked_state(
             &deps,
             Uint128(225 * 10u128.pow(8)),
-            Uint128(150 * 10u128.pow(18))
+            Uint128(150 * 10u128.pow(18)),
         );
 
         // Unbond more than allowed
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(50 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(50 * 10u128.pow(8)));
                 assert!(shares < Uint128(50 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -2366,21 +2354,13 @@ mod staking_tests {
 
         let handle_msg = HandleMsg::SetDistributorsStatus {
             enabled: false,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("other", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("other", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
     }
 
@@ -2394,7 +2374,7 @@ mod staking_tests {
         match from_binary(&query_response).unwrap() {
             QueryAnswer::Distributors { distributors } => {
                 assert_eq!(distributors.unwrap().len(), 1);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2402,18 +2382,10 @@ mod staking_tests {
             distributors: vec![HumanAddr("new_distrib".to_string())],
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("not_admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("not_admin", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let query_msg = QueryMsg::Distributors {};
@@ -2424,7 +2396,7 @@ mod staking_tests {
                 let distrib = distributors.unwrap();
                 assert_eq!(distrib.len(), 2);
                 assert_eq!(distrib[1], HumanAddr("new_distrib".to_string()));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -2437,18 +2409,10 @@ mod staking_tests {
             distributors: vec![HumanAddr("new_distrib".to_string())],
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("not_admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("not_admin", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let query_msg = QueryMsg::Distributors {};
@@ -2459,7 +2423,7 @@ mod staking_tests {
                 let distrib = distributors.unwrap();
                 assert_eq!(distrib.len(), 1);
                 assert_eq!(distrib[0], HumanAddr("new_distrib".to_string()));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -2469,18 +2433,19 @@ mod staking_tests {
         let (init_result, mut deps) = init_helper_staking();
         new_staked_account(&mut deps, "sender", "key", Uint128(100 * 10u128.pow(8)));
         new_staked_account(&mut deps, "distrib", "key", Uint128(100 * 10u128.pow(8)));
-        new_staked_account(&mut deps, "not_distrib", "key", Uint128(100 * 10u128.pow(8)));
+        new_staked_account(
+            &mut deps,
+            "not_distrib",
+            "key",
+            Uint128(100 * 10u128.pow(8)),
+        );
 
         let handle_msg = HandleMsg::SetDistributors {
             distributors: vec![HumanAddr("distrib".to_string())],
             padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Distrib is sender
@@ -2490,21 +2455,13 @@ mod staking_tests {
             amount: Uint128(10 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("not_distrib", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("not_distrib", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("distrib", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("distrib", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Send to distrib
@@ -2514,14 +2471,10 @@ mod staking_tests {
             amount: Uint128(10 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("sender", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("sender", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let handle_msg = HandleMsg::Send {
@@ -2530,14 +2483,10 @@ mod staking_tests {
             amount: Uint128(10 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("sender", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("sender", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
     }
 
@@ -2548,14 +2497,10 @@ mod staking_tests {
 
         let handle_msg = HandleMsg::SetDistributorsStatus {
             enabled: false,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Add rewards
@@ -2567,30 +2512,32 @@ mod staking_tests {
             memo: None,
             padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check account to confirm it works
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(100 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(100 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128(50 * 10u128.pow(8)));
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2601,35 +2548,36 @@ mod staking_tests {
             amount: Uint128(10 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check that it was autoclaimed
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("foo".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(90 * 10u128.pow(8)));
                 assert!(shares < Uint128(90 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
-
     }
 
     #[test]
@@ -2640,14 +2588,10 @@ mod staking_tests {
 
         let handle_msg = HandleMsg::SetDistributorsStatus {
             enabled: false,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Send msg
@@ -2657,26 +2601,29 @@ mod staking_tests {
             amount: Uint128(10 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check that it was autoclaimed
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, cooldown, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                cooldown,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(110 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(110 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
@@ -2684,7 +2631,7 @@ mod staking_tests {
                 assert_eq!(unbonded, None);
                 assert_eq!(cooldown.0.len(), 1);
                 assert_eq!(cooldown.0[0].amount, Uint128(10 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2695,26 +2642,29 @@ mod staking_tests {
             amount: Uint128(100 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("bar", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("bar", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check that it was autoclaimed
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, cooldown, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                cooldown,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(10 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(10 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
@@ -2722,7 +2672,7 @@ mod staking_tests {
                 assert_eq!(unbonded, None);
                 assert_eq!(cooldown.0.len(), 1);
                 assert_eq!(cooldown.0[0].amount, Uint128(10 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -2733,33 +2683,36 @@ mod staking_tests {
             amount: Uint128(10 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("bar", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("bar", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check that it was autoclaimed
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, cooldown, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                cooldown,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128::zero());
                 assert_eq!(shares, Uint128::zero());
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
                 assert_eq!(cooldown.0.len(), 0);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -2772,14 +2725,10 @@ mod staking_tests {
 
         let handle_msg = HandleMsg::SetDistributorsStatus {
             enabled: false,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Send msg
@@ -2789,26 +2738,29 @@ mod staking_tests {
             amount: Uint128(10 * 10u128.pow(8)),
             msg: None,
             memo: None,
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check that it was autoclaimed
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, cooldown, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                cooldown,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(110 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(110 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
@@ -2816,33 +2768,36 @@ mod staking_tests {
                 assert_eq!(unbonded, None);
                 assert_eq!(cooldown.0.len(), 1);
                 assert_eq!(cooldown.0[0].amount, Uint128(10 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Unbond
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(100 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("bar", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("bar", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check that it was autoclaimed
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, cooldown, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                cooldown,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(10 * 10u128.pow(8)));
                 assert_eq!(shares, Uint128(10 * 10u128.pow(18)));
                 assert_eq!(pending_rewards, Uint128::zero());
@@ -2850,40 +2805,43 @@ mod staking_tests {
                 assert_eq!(unbonded, None);
                 assert_eq!(cooldown.0.len(), 1);
                 assert_eq!(cooldown.0[0].amount, Uint128(10 * 10u128.pow(8)));
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
         // Unbond
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(10 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
-        let handle_result = handle(
-            &mut deps,
-            mock_env("bar", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("bar", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         // Check that it was autoclaimed
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bar".to_string()),
             key: "key".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, cooldown, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                cooldown,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128::zero());
                 assert_eq!(shares, Uint128::zero());
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128(110 * 10u128.pow(8)));
                 assert_eq!(unbonded, None);
                 assert_eq!(cooldown.0.len(), 0);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -2895,14 +2853,10 @@ mod staking_tests {
 
         let handle_msg = HandleMsg::SetDistributorsStatus {
             enabled: false,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let pause_msg = HandleMsg::SetContractStatus {
@@ -2926,16 +2880,12 @@ mod staking_tests {
             sender: HumanAddr("foo".to_string()),
             from: Default::default(),
             amount: Uint128(100 * 10u128.pow(8)),
-            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond { useFrom: None }).unwrap()),
             memo: None,
             padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
         let handle_msg = HandleMsg::Receive {
@@ -2947,23 +2897,15 @@ mod staking_tests {
             padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(10 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
     }
 
@@ -2974,14 +2916,10 @@ mod staking_tests {
 
         let handle_msg = HandleMsg::SetDistributorsStatus {
             enabled: false,
-            padding: None
+            padding: None,
         };
 
-        let handle_result = handle(
-            &mut deps,
-            mock_env("admin", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("admin", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
 
         let pause_msg = HandleMsg::SetContractStatus {
@@ -3005,16 +2943,12 @@ mod staking_tests {
             sender: HumanAddr("foo".to_string()),
             from: Default::default(),
             amount: Uint128(100 * 10u128.pow(8)),
-            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond { useFrom: None }).unwrap()),
             memo: None,
             padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
         let handle_msg = HandleMsg::Receive {
@@ -3026,23 +2960,15 @@ mod staking_tests {
             padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
 
         let handle_msg = HandleMsg::Unbond {
             amount: Uint128(10 * 10u128.pow(8)),
-            padding: None
+            padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("foo", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("foo", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
     }
 }
@@ -3050,52 +2976,44 @@ mod staking_tests {
 #[cfg(test)]
 mod snip20_tests {
     use super::*;
+    use crate::msg::InitConfig;
     use crate::msg::ResponseStatus;
-    use crate::msg::{InitConfig};
     use cosmwasm_std::testing::*;
     use cosmwasm_std::{from_binary, BlockInfo, ContractInfo, MessageInfo, QueryResponse, WasmMsg};
-    use std::any::Any;
     use shade_protocol::shd_staking::ReceiveType;
     use shade_protocol::utils::asset::Contract;
+    use std::any::Any;
 
     // Helper functions
     #[derive(Clone)]
     struct InitBalance {
         pub acc: &'static str,
         pub pwd: &'static str,
-        pub stake: Uint128
+        pub stake: Uint128,
     }
 
     fn new_staked_account(
         deps: &mut Extern<MockStorage, MockApi, MockQuerier>,
         acc: &str,
         pwd: &str,
-        stake: Uint128
+        stake: Uint128,
     ) {
         let handle_msg = HandleMsg::Receive {
             sender: HumanAddr(acc.to_string()),
             from: Default::default(),
             amount: stake,
-            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond { useFrom: None }).unwrap()),
             memo: None,
             padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_ok());
         let handle_msg = HandleMsg::SetViewingKey {
             key: pwd.to_string(),
             padding: None,
         };
-        let handle_result = handle(
-            deps,
-            mock_env(acc, &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(deps, mock_env(acc, &[]), handle_msg.clone());
         assert!(handle_result.is_ok())
     }
 
@@ -3119,12 +3037,12 @@ mod snip20_tests {
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
+                code_hash: "hash".to_string(),
             },
             treasury: Some(HumanAddr("treasury".to_string())),
             treasury_code_hash: None,
             limit_transfer: false,
-            distributors: None
+            distributors: None,
         };
 
         let init = init(&mut deps, env, init_msg);
@@ -3179,12 +3097,12 @@ mod snip20_tests {
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
+                code_hash: "hash".to_string(),
             },
             treasury: Some(HumanAddr("treasury".to_string())),
             treasury_code_hash: None,
             limit_transfer: false,
-            distributors: None
+            distributors: None,
         };
 
         let init = init(&mut deps, env, init_msg);
@@ -3243,7 +3161,7 @@ mod snip20_tests {
         let handle_result: HandleAnswer = from_binary(&handle_result.data.unwrap()).unwrap();
 
         match handle_result {
-            | HandleAnswer::UpdateStakeConfig { status }
+            HandleAnswer::UpdateStakeConfig { status }
             | HandleAnswer::Receive { status }
             | HandleAnswer::Unbond { status }
             | HandleAnswer::ClaimUnbond { status }
@@ -3276,7 +3194,7 @@ mod snip20_tests {
         let (init_result, deps) = init_helper(vec![InitBalance {
             acc: "lebron",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
 
         let config = ReadonlyConfig::from_storage(&deps.storage);
@@ -3300,7 +3218,7 @@ mod snip20_tests {
             vec![InitBalance {
                 acc: "lebron",
                 pwd: "pwd",
-                stake: Uint128(5000)
+                stake: Uint128(5000),
             }],
             true,
             true,
@@ -3329,7 +3247,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "lebron",
             pwd: "pwd",
-            stake: Uint128(u128::MAX)
+            stake: Uint128(u128::MAX),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3337,27 +3255,21 @@ mod snip20_tests {
             init_result.err().unwrap()
         );
 
-        let (init_result, _deps) = init_helper(vec![
-            InitBalance {
-                acc: "lebron",
-                pwd: "pwd",
-                stake: Uint128(u128::MAX)
-            },
-        ]);
+        let (init_result, _deps) = init_helper(vec![InitBalance {
+            acc: "lebron",
+            pwd: "pwd",
+            stake: Uint128(u128::MAX),
+        }]);
         let handle_msg = HandleMsg::Receive {
             sender: HumanAddr("giannis".to_string()),
             from: Default::default(),
             amount: Uint128(1),
-            msg: Some(to_binary(&ReceiveType::Bond{useFrom:None}).unwrap()),
+            msg: Some(to_binary(&ReceiveType::Bond { useFrom: None }).unwrap()),
             memo: None,
             padding: None,
         };
         // Bond tokens
-        let handle_result = handle(
-            &mut deps,
-            mock_env("token", &[]),
-            handle_msg.clone()
-        );
+        let handle_result = handle(&mut deps, mock_env("token", &[]), handle_msg.clone());
         assert!(handle_result.is_err());
     }
 
@@ -3366,7 +3278,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3377,19 +3289,25 @@ mod snip20_tests {
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bob".to_string()),
             key: "pwd".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(5000));
                 assert_eq!(shares, Uint128(50000000000000));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -3400,7 +3318,7 @@ mod snip20_tests {
             QueryAnswer::TotalStaked { shares, tokens } => {
                 assert_eq!(tokens, Uint128(5000));
                 assert_eq!(shares, Uint128(50000000000000))
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -3438,19 +3356,25 @@ mod snip20_tests {
         let query_msg = QueryMsg::Staked {
             address: HumanAddr("bob".to_string()),
             key: "pwd".to_string(),
-            time: None
+            time: None,
         };
 
         let query_response = query(&deps, query_msg).unwrap();
         match from_binary(&query_response).unwrap() {
-            QueryAnswer::Staked { tokens, shares, pending_rewards,
-                unbonding, unbonded, .. } => {
+            QueryAnswer::Staked {
+                tokens,
+                shares,
+                pending_rewards,
+                unbonding,
+                unbonded,
+                ..
+            } => {
                 assert_eq!(tokens, Uint128(4000));
                 assert_eq!(shares, Uint128(40000000000000));
                 assert_eq!(pending_rewards, Uint128::zero());
                 assert_eq!(unbonding, Uint128::zero());
                 assert_eq!(unbonded, None);
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
 
@@ -3461,7 +3385,7 @@ mod snip20_tests {
             QueryAnswer::TotalStaked { shares, tokens } => {
                 assert_eq!(tokens, Uint128(5000));
                 assert_eq!(shares, Uint128(50000000000000))
-            },
+            }
             _ => panic!("Unexpected result from query"),
         };
     }
@@ -3471,7 +3395,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3519,7 +3443,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3546,7 +3470,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3583,7 +3507,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3633,7 +3557,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3757,7 +3681,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3881,7 +3805,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -3961,7 +3885,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4028,7 +3952,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4059,7 +3983,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "admin",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4090,10 +4014,10 @@ mod snip20_tests {
         let admin_err = "Admin commands can only be run from admin address".to_string();
         let (init_result, mut deps) = init_helper_with_config(
             vec![InitBalance {
-            acc: "lebron",
-            pwd: "pwd",
-            stake: Uint128(5000)
-        }],
+                acc: "lebron",
+                pwd: "pwd",
+                stake: Uint128(5000),
+            }],
             false,
             false,
             true,
@@ -4128,7 +4052,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "lebron",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4169,7 +4093,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "giannis",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4247,12 +4171,12 @@ mod snip20_tests {
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
+                code_hash: "hash".to_string(),
             },
             treasury: Some(HumanAddr("treasury".to_string())),
             treasury_code_hash: None,
             limit_transfer: true,
-            distributors: None
+            distributors: None,
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(
@@ -4319,12 +4243,12 @@ mod snip20_tests {
             unbond_time: 10,
             staked_token: Contract {
                 address: HumanAddr("token".to_string()),
-                code_hash: "hash".to_string()
+                code_hash: "hash".to_string(),
             },
             treasury: Some(HumanAddr("treasury".to_string())),
             treasury_code_hash: None,
             limit_transfer: true,
-            distributors: None
+            distributors: None,
         };
         let init_result = init(&mut deps, env, init_msg);
         assert!(
@@ -4345,7 +4269,7 @@ mod snip20_tests {
         let query_answer: QueryAnswer = from_binary(&query_result.unwrap()).unwrap();
         match query_answer {
             QueryAnswer::TokenConfig {
-                public_total_supply
+                public_total_supply,
             } => {
                 assert_eq!(public_total_supply, true);
             }
@@ -4358,7 +4282,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "giannis",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4468,7 +4392,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4516,7 +4440,7 @@ mod snip20_tests {
         let (init_result, mut deps) = init_helper(vec![InitBalance {
             acc: "bob",
             pwd: "pwd",
-            stake: Uint128(5000)
+            stake: Uint128(5000),
         }]);
         assert!(
             init_result.is_ok(),
@@ -4620,7 +4544,7 @@ mod snip20_tests {
             vec![InitBalance {
                 acc: "bob",
                 pwd: "pwd",
-                stake: Uint128(10000)
+                stake: Uint128(10000),
             }],
             true,
             true,

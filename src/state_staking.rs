@@ -1,9 +1,9 @@
-use std::collections::BinaryHeap;
 use cosmwasm_std::{HumanAddr, Uint128};
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use shade_protocol::shd_staking::stake::{Cooldown, DailyUnbonding, Unbonding, VecQueue};
 use shade_protocol::utils::storage::{BucketStorage, SingletonStorage};
+use std::collections::BinaryHeap;
 
 // used to determine what each token is worth to calculate rewards
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -89,7 +89,7 @@ impl SingletonStorage for DailyUnbondingQueue {
 #[serde(rename_all = "snake_case")]
 pub struct UserCooldown {
     pub total: Uint128,
-    pub queue: VecQueue<Cooldown>
+    pub queue: VecQueue<Cooldown>,
 }
 
 impl BucketStorage for UserCooldown {
@@ -109,10 +109,9 @@ impl UserCooldown {
             if self.queue.0[index].amount <= remaining {
                 let item = self.queue.0.remove(index);
                 remaining = (remaining - item.amount).unwrap();
-            }
-            else {
+            } else {
                 self.queue.0[index].amount = (self.queue.0[index].amount - remaining).unwrap();
-                break
+                break;
             }
         }
     }
@@ -122,9 +121,8 @@ impl UserCooldown {
             if self.queue.0[0].release <= time {
                 let i = self.queue.pop().unwrap();
                 self.total = (self.total - i.amount).unwrap();
-            }
-            else {
-                break
+            } else {
+                break;
             }
         }
     }

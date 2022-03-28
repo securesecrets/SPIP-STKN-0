@@ -51,24 +51,23 @@ pub enum TxAction {
     Deposit {},
     Redeem {},
     Stake {
-        staker: HumanAddr
+        staker: HumanAddr,
     },
     AddReward {
-        funder: HumanAddr
+        funder: HumanAddr,
     },
     FundUnbond {
-        funder: HumanAddr
+        funder: HumanAddr,
     },
     Unbond {
-        staker: HumanAddr
+        staker: HumanAddr,
     },
     ClaimUnbond {
-        staker: HumanAddr
+        staker: HumanAddr,
     },
     ClaimReward {
-        staker: HumanAddr
+        staker: HumanAddr,
     },
-
 }
 
 // Note that id is a globally incrementing counter.
@@ -330,7 +329,6 @@ impl StoredTxAction {
                 let staker = api.human_address(&staker)?;
                 TxAction::ClaimReward { staker }
             }
-
         };
 
         Ok(action)
@@ -498,7 +496,7 @@ pub fn store_stake<S: Storage>(
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::stake( staker.clone() );
+    let action = StoredTxAction::stake(staker.clone());
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
     append_tx(store, &tx, staker)?;
@@ -516,7 +514,7 @@ pub fn store_add_reward<S: Storage>(
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::add_reward( staker.clone() );
+    let action = StoredTxAction::add_reward(staker.clone());
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
     append_tx(store, &tx, staker)?;
@@ -534,7 +532,7 @@ pub fn store_fund_unbond<S: Storage>(
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::fund_unbond( staker.clone() );
+    let action = StoredTxAction::fund_unbond(staker.clone());
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
     append_tx(store, &tx, staker)?;
@@ -552,7 +550,7 @@ pub fn store_unbond<S: Storage>(
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::unbond( staker.clone() );
+    let action = StoredTxAction::unbond(staker.clone());
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
     append_tx(store, &tx, staker)?;
@@ -570,7 +568,7 @@ pub fn store_claim_unbond<S: Storage>(
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::claim_unbond( staker.clone() );
+    let action = StoredTxAction::claim_unbond(staker.clone());
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
     append_tx(store, &tx, staker)?;
@@ -588,7 +586,7 @@ pub fn store_claim_reward<S: Storage>(
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::claim_reward( staker.clone() );
+    let action = StoredTxAction::claim_reward(staker.clone());
     let tx = StoredRichTx::new(id, action, coins, memo, block);
 
     append_tx(store, &tx, staker)?;

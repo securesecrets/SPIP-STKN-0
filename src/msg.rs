@@ -8,8 +8,8 @@ use crate::transaction_history::{RichTx, Tx};
 use crate::viewing_key::ViewingKey;
 use cosmwasm_std::{Binary, HumanAddr, StdError, StdResult, Uint128};
 use secret_toolkit::permit::Permit;
-use shade_protocol::utils::asset::Contract;
 use shade_protocol::shd_staking::stake::{QueueItem, StakeConfig, VecQueue};
+use shade_protocol::utils::asset::Contract;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InitMsg {
@@ -30,7 +30,7 @@ pub struct InitMsg {
 
     // Distributors
     pub limit_transfer: bool,
-    pub distributors: Option<Vec<HumanAddr>>
+    pub distributors: Option<Vec<HumanAddr>>,
 }
 
 impl InitMsg {
@@ -64,7 +64,7 @@ pub enum HandleMsg {
         unbond_time: Option<u64>,
         disable_treasury: bool,
         treasury: Option<HumanAddr>,
-        padding: Option<String>
+        padding: Option<String>,
     },
     Receive {
         sender: HumanAddr,
@@ -72,20 +72,20 @@ pub enum HandleMsg {
         amount: Uint128,
         msg: Option<Binary>,
         memo: Option<String>,
-        padding: Option<String>
+        padding: Option<String>,
     },
     Unbond {
         amount: Uint128,
-        padding: Option<String>
+        padding: Option<String>,
     },
     ClaimUnbond {
-        padding: Option<String>
+        padding: Option<String>,
     },
     ClaimRewards {
-        padding: Option<String>
+        padding: Option<String>,
     },
     StakeRewards {
-        padding: Option<String>
+        padding: Option<String>,
     },
 
     // Balance
@@ -94,28 +94,28 @@ pub enum HandleMsg {
         code_hash: Option<String>,
         msg: Option<Binary>,
         memo: Option<String>,
-        padding: Option<String>
+        padding: Option<String>,
     },
     ExposeBalanceWithCooldown {
         recipient: HumanAddr,
         code_hash: Option<String>,
         msg: Option<Binary>,
         memo: Option<String>,
-        padding: Option<String>
+        padding: Option<String>,
     },
 
     // Distributors
     SetDistributorsStatus {
         enabled: bool,
-        padding: Option<String>
+        padding: Option<String>,
     },
     AddDistributors {
         distributors: Vec<HumanAddr>,
-        padding: Option<String>
+        padding: Option<String>,
     },
     SetDistributors {
         distributors: Vec<HumanAddr>,
-        padding: Option<String>
+        padding: Option<String>,
     },
 
     // Base ERC-20 stuff
@@ -212,16 +212,36 @@ pub enum HandleMsg {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleAnswer {
-    UpdateStakeConfig { status: ResponseStatus },
-    Receive { status: ResponseStatus },
-    Unbond { status: ResponseStatus },
-    ClaimUnbond { status: ResponseStatus },
-    ClaimRewards { status: ResponseStatus },
-    StakeRewards { status: ResponseStatus },
-    ExposeBalance { status: ResponseStatus },
-    SetDistributorsStatus { status: ResponseStatus },
-    AddDistributors { status: ResponseStatus },
-    SetDistributors { status: ResponseStatus },
+    UpdateStakeConfig {
+        status: ResponseStatus,
+    },
+    Receive {
+        status: ResponseStatus,
+    },
+    Unbond {
+        status: ResponseStatus,
+    },
+    ClaimUnbond {
+        status: ResponseStatus,
+    },
+    ClaimRewards {
+        status: ResponseStatus,
+    },
+    StakeRewards {
+        status: ResponseStatus,
+    },
+    ExposeBalance {
+        status: ResponseStatus,
+    },
+    SetDistributorsStatus {
+        status: ResponseStatus,
+    },
+    AddDistributors {
+        status: ResponseStatus,
+    },
+    SetDistributors {
+        status: ResponseStatus,
+    },
 
     // Base
     Transfer {
@@ -295,7 +315,7 @@ pub enum QueryMsg {
     Unbonding {},
     Unfunded {
         start: u64,
-        total: u64
+        total: u64,
     },
     Staked {
         address: HumanAddr,
@@ -341,7 +361,7 @@ pub enum QueryMsg {
 impl QueryMsg {
     pub fn get_validation_params(&self) -> (Vec<&HumanAddr>, ViewingKey) {
         match self {
-            Self::Staked { address, key, ..} => (vec![address], ViewingKey(key.clone())),
+            Self::Staked { address, key, .. } => (vec![address], ViewingKey(key.clone())),
             Self::Balance { address, key } => (vec![address], ViewingKey(key.clone())),
             Self::TransferHistory { address, key, .. } => (vec![address], ViewingKey(key.clone())),
             Self::TransactionHistory { address, key, .. } => {
@@ -390,11 +410,11 @@ pub enum QueryAnswer {
     },
     TotalStaked {
         tokens: Uint128,
-        shares: Uint128
+        shares: Uint128,
     },
     // Shares per token
     StakeRate {
-        shares: Uint128
+        shares: Uint128,
     },
     Staked {
         tokens: Uint128,
@@ -402,18 +422,18 @@ pub enum QueryAnswer {
         pending_rewards: Uint128,
         unbonding: Uint128,
         unbonded: Option<Uint128>,
-        cooldown: VecQueue<QueueItem>
+        cooldown: VecQueue<QueueItem>,
     },
     Unbonding {
-        total: Uint128
+        total: Uint128,
     },
     Unfunded {
-        total: Uint128
+        total: Uint128,
     },
 
     // Distributors
     Distributors {
-        distributors: Option<Vec<HumanAddr>>
+        distributors: Option<Vec<HumanAddr>>,
     },
 
     // Snip20 stuff

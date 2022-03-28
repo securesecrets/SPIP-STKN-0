@@ -1,8 +1,13 @@
 use std::any::type_name;
 use std::convert::TryFrom;
 
-use cosmwasm_std::{CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage, Uint128};
-use cosmwasm_storage::{bucket, Bucket, bucket_read, PrefixedStorage, ReadonlyBucket, ReadonlyPrefixedStorage, ReadonlySingleton, singleton, Singleton, singleton_read};
+use cosmwasm_std::{
+    CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage, Uint128,
+};
+use cosmwasm_storage::{
+    bucket, bucket_read, singleton, singleton_read, Bucket, PrefixedStorage, ReadonlyBucket,
+    ReadonlyPrefixedStorage, ReadonlySingleton, Singleton,
+};
 
 use secret_toolkit::storage::{TypedStore, TypedStoreMut};
 
