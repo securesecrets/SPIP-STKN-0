@@ -84,7 +84,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     let mut config = Config::from_storage(&mut deps.storage);
     config.set_constants(&Constants {
         name: msg.name,
-        symbol: msg.symbol,
+        symbol: "STKD-".to_string() + &msg.symbol,
         decimals: staked_token_decimals,
         admin,
         prng_seed: prng_seed_hashed.to_vec(),
@@ -3195,7 +3195,7 @@ mod snip20_tests {
         assert_eq!(config.contract_status(), ContractStatusLevel::NormalRun);
         assert_eq!(constants.name, "sec-sec".to_string());
         assert_eq!(constants.admin, HumanAddr("admin".to_string()));
-        assert_eq!(constants.symbol, "SECSEC".to_string());
+        assert_eq!(constants.symbol, "STKD-SECSEC".to_string());
         assert_eq!(constants.decimals, 8);
         assert_eq!(
             constants.prng_seed,
@@ -3225,7 +3225,7 @@ mod snip20_tests {
         assert_eq!(config.contract_status(), ContractStatusLevel::NormalRun);
         assert_eq!(constants.name, "sec-sec".to_string());
         assert_eq!(constants.admin, HumanAddr("admin".to_string()));
-        assert_eq!(constants.symbol, "SECSEC".to_string());
+        assert_eq!(constants.symbol, "STKD-SECSEC".to_string());
         assert_eq!(constants.decimals, 8);
         assert_eq!(
             constants.prng_seed,
@@ -4195,7 +4195,7 @@ mod snip20_tests {
                 total_supply,
             } => {
                 assert_eq!(name, init_name);
-                assert_eq!(symbol, init_symbol);
+                assert_eq!(symbol, "STKD-".to_string() + &init_symbol);
                 assert_eq!(decimals, init_decimals);
                 assert_eq!(total_supply, Some(Uint128(5000)));
             }
@@ -4622,7 +4622,7 @@ mod snip20_tests {
                     recipient: HumanAddr("mango".to_string()),
                 },
                 coins: Coin {
-                    denom: "SECSEC".to_string(),
+                    denom: "STKD-SECSEC".to_string(),
                     amount: Uint128(2500),
                 },
                 memo: Some("my transfer message #3".to_string()),
@@ -4637,7 +4637,7 @@ mod snip20_tests {
                     recipient: HumanAddr("banana".to_string()),
                 },
                 coins: Coin {
-                    denom: "SECSEC".to_string(),
+                    denom: "STKD-SECSEC".to_string(),
                     amount: Uint128(500),
                 },
                 memo: Some("my transfer message #2".to_string()),
@@ -4652,7 +4652,7 @@ mod snip20_tests {
                     recipient: HumanAddr("alice".to_string()),
                 },
                 coins: Coin {
-                    denom: "SECSEC".to_string(),
+                    denom: "STKD-SECSEC".to_string(),
                     amount: Uint128(1000),
                 },
                 memo: Some("my transfer message #1".to_string()),
@@ -4665,7 +4665,7 @@ mod snip20_tests {
                     staker: HumanAddr("bob".to_string()),
                 },
                 coins: Coin {
-                    denom: "SECSEC".to_string(),
+                    denom: "STKD-SECSEC".to_string(),
                     amount: Uint128(10000),
                 },
                 memo: None,
