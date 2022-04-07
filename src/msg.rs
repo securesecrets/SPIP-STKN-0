@@ -8,22 +8,29 @@ use crate::transaction_history::{RichTx, Tx};
 use crate::viewing_key::ViewingKey;
 use cosmwasm_std::{Binary, HumanAddr, StdError, StdResult, Uint128};
 use secret_toolkit::permit::Permit;
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
-pub struct InitialBalance {
-    pub address: HumanAddr,
-    pub amount: Uint128,
-}
+use shade_protocol::shd_staking::stake::{QueueItem, StakeConfig, VecQueue};
+use shade_protocol::utils::asset::Contract;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InitMsg {
     pub name: String,
     pub admin: Option<HumanAddr>,
     pub symbol: String,
-    pub decimals: u8,
-    pub initial_balances: Option<Vec<InitialBalance>>,
+    // Will default to staked token decimals if not set
+    pub decimals: Option<u8>,
+    pub share_decimals: u8,
     pub prng_seed: Binary,
     pub config: Option<InitConfig>,
+
+    // Stake
+    pub unbond_time: u64,
+    pub staked_token: Contract,
+    pub treasury: Option<HumanAddr>,
+    pub treasury_code_hash: Option<String>,
+
+    // Distributors
+    pub limit_transfer: bool,
+    pub distributors: Option<Vec<HumanAddr>>,
 }
 
 impl InitMsg {
@@ -40,53 +47,74 @@ impl InitMsg {
 pub struct InitConfig {
     /// Indicates whether the total supply is public or should be kept secret.
     /// default: False
-    public_total_supply: Option<bool>,
-    /// Indicates whether deposit functionality should be enabled
-    /// default: False
-    enable_deposit: Option<bool>,
-    /// Indicates whether redeem functionality should be enabled
-    /// default: False
-    enable_redeem: Option<bool>,
-    /// Indicates whether mint functionality should be enabled
-    /// default: False
-    enable_mint: Option<bool>,
-    /// Indicates whether burn functionality should be enabled
-    /// default: False
-    enable_burn: Option<bool>,
+    pub public_total_supply: Option<bool>,
 }
 
 impl InitConfig {
     pub fn public_total_supply(&self) -> bool {
         self.public_total_supply.unwrap_or(false)
     }
-
-    pub fn deposit_enabled(&self) -> bool {
-        self.enable_deposit.unwrap_or(false)
-    }
-
-    pub fn redeem_enabled(&self) -> bool {
-        self.enable_redeem.unwrap_or(false)
-    }
-
-    pub fn mint_enabled(&self) -> bool {
-        self.enable_mint.unwrap_or(false)
-    }
-
-    pub fn burn_enabled(&self) -> bool {
-        self.enable_burn.unwrap_or(false)
-    }
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleMsg {
-    // Native coin interactions
-    Redeem {
-        amount: Uint128,
-        denom: Option<String>,
+    // Staking
+    UpdateStakeConfig {
+        unbond_time: Option<u64>,
+        disable_treasury: bool,
+        treasury: Option<HumanAddr>,
         padding: Option<String>,
     },
-    Deposit {
+    Receive {
+        sender: HumanAddr,
+        from: HumanAddr,
+        amount: Uint128,
+        msg: Option<Binary>,
+        memo: Option<String>,
+        padding: Option<String>,
+    },
+    Unbond {
+        amount: Uint128,
+        padding: Option<String>,
+    },
+    ClaimUnbond {
+        padding: Option<String>,
+    },
+    ClaimRewards {
+        padding: Option<String>,
+    },
+    StakeRewards {
+        padding: Option<String>,
+    },
+
+    // Balance
+    ExposeBalance {
+        recipient: HumanAddr,
+        code_hash: Option<String>,
+        msg: Option<Binary>,
+        memo: Option<String>,
+        padding: Option<String>,
+    },
+    ExposeBalanceWithCooldown {
+        recipient: HumanAddr,
+        code_hash: Option<String>,
+        msg: Option<Binary>,
+        memo: Option<String>,
+        padding: Option<String>,
+    },
+
+    // Distributors
+    SetDistributorsStatus {
+        enabled: bool,
+        padding: Option<String>,
+    },
+    AddDistributors {
+        distributors: Vec<HumanAddr>,
+        padding: Option<String>,
+    },
+    SetDistributors {
+        distributors: Vec<HumanAddr>,
         padding: Option<String>,
     },
 
@@ -111,11 +139,6 @@ pub enum HandleMsg {
     },
     BatchSend {
         actions: Vec<batch::SendAction>,
-        padding: Option<String>,
-    },
-    Burn {
-        amount: Uint128,
-        memo: Option<String>,
         padding: Option<String>,
     },
     RegisterReceive {
@@ -168,40 +191,6 @@ pub enum HandleMsg {
         actions: Vec<batch::SendFromAction>,
         padding: Option<String>,
     },
-    BurnFrom {
-        owner: HumanAddr,
-        amount: Uint128,
-        memo: Option<String>,
-        padding: Option<String>,
-    },
-    BatchBurnFrom {
-        actions: Vec<batch::BurnFromAction>,
-        padding: Option<String>,
-    },
-
-    // Mint
-    Mint {
-        recipient: HumanAddr,
-        amount: Uint128,
-        memo: Option<String>,
-        padding: Option<String>,
-    },
-    BatchMint {
-        actions: Vec<batch::MintAction>,
-        padding: Option<String>,
-    },
-    AddMinters {
-        minters: Vec<HumanAddr>,
-        padding: Option<String>,
-    },
-    RemoveMinters {
-        minters: Vec<HumanAddr>,
-        padding: Option<String>,
-    },
-    SetMinters {
-        minters: Vec<HumanAddr>,
-        padding: Option<String>,
-    },
 
     // Admin
     ChangeAdmin {
@@ -223,11 +212,34 @@ pub enum HandleMsg {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleAnswer {
-    // Native
-    Deposit {
+    UpdateStakeConfig {
         status: ResponseStatus,
     },
-    Redeem {
+    Receive {
+        status: ResponseStatus,
+    },
+    Unbond {
+        status: ResponseStatus,
+    },
+    ClaimUnbond {
+        status: ResponseStatus,
+    },
+    ClaimRewards {
+        status: ResponseStatus,
+    },
+    StakeRewards {
+        status: ResponseStatus,
+    },
+    ExposeBalance {
+        status: ResponseStatus,
+    },
+    SetDistributorsStatus {
+        status: ResponseStatus,
+    },
+    AddDistributors {
+        status: ResponseStatus,
+    },
+    SetDistributors {
         status: ResponseStatus,
     },
 
@@ -242,9 +254,6 @@ pub enum HandleAnswer {
         status: ResponseStatus,
     },
     BatchSend {
-        status: ResponseStatus,
-    },
-    Burn {
         status: ResponseStatus,
     },
     RegisterReceive {
@@ -280,29 +289,6 @@ pub enum HandleAnswer {
     BatchSendFrom {
         status: ResponseStatus,
     },
-    BurnFrom {
-        status: ResponseStatus,
-    },
-    BatchBurnFrom {
-        status: ResponseStatus,
-    },
-
-    // Mint
-    Mint {
-        status: ResponseStatus,
-    },
-    BatchMint {
-        status: ResponseStatus,
-    },
-    AddMinters {
-        status: ResponseStatus,
-    },
-    RemoveMinters {
-        status: ResponseStatus,
-    },
-    SetMinters {
-        status: ResponseStatus,
-    },
 
     // Other
     ChangeAdmin {
@@ -321,10 +307,29 @@ pub enum HandleAnswer {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
+    // Staking
+    StakeConfig {},
+    TotalStaked {},
+    // Total token shares per token
+    StakeRate {},
+    Unbonding {},
+    Unfunded {
+        start: u64,
+        total: u64,
+    },
+    Staked {
+        address: HumanAddr,
+        key: String,
+        time: Option<u64>,
+    },
+
+    // Distributors
+    Distributors {},
+
+    // Snip20 stuff
     TokenInfo {},
     TokenConfig {},
     ContractStatus {},
-    ExchangeRate {},
     Allowance {
         owner: HumanAddr,
         spender: HumanAddr,
@@ -346,7 +351,6 @@ pub enum QueryMsg {
         page: Option<u32>,
         page_size: u32,
     },
-    Minters {},
     WithPermit {
         permit: Permit,
         query: QueryWithPermit,
@@ -356,6 +360,7 @@ pub enum QueryMsg {
 impl QueryMsg {
     pub fn get_validation_params(&self) -> (Vec<&HumanAddr>, ViewingKey) {
         match self {
+            Self::Staked { address, key, .. } => (vec![address], ViewingKey(key.clone())),
             Self::Balance { address, key } => (vec![address], ViewingKey(key.clone())),
             Self::TransferHistory { address, key, .. } => (vec![address], ViewingKey(key.clone())),
             Self::TransactionHistory { address, key, .. } => {
@@ -375,6 +380,11 @@ impl QueryMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryWithPermit {
+    Staked {
+        time: Option<u64>,
+    },
+
+    // Snip20 stuff
     Allowance {
         owner: HumanAddr,
         spender: HumanAddr,
@@ -393,6 +403,39 @@ pub enum QueryWithPermit {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryAnswer {
+    // Stake
+    StakedConfig {
+        config: StakeConfig,
+    },
+    TotalStaked {
+        tokens: Uint128,
+        shares: Uint128,
+    },
+    // Shares per token
+    StakeRate {
+        shares: Uint128,
+    },
+    Staked {
+        tokens: Uint128,
+        shares: Uint128,
+        pending_rewards: Uint128,
+        unbonding: Uint128,
+        unbonded: Option<Uint128>,
+        cooldown: VecQueue<QueueItem>,
+    },
+    Unbonding {
+        total: Uint128,
+    },
+    Unfunded {
+        total: Uint128,
+    },
+
+    // Distributors
+    Distributors {
+        distributors: Option<Vec<HumanAddr>>,
+    },
+
+    // Snip20 stuff
     TokenInfo {
         name: String,
         symbol: String,
@@ -401,10 +444,6 @@ pub enum QueryAnswer {
     },
     TokenConfig {
         public_total_supply: bool,
-        deposit_enabled: bool,
-        redeem_enabled: bool,
-        mint_enabled: bool,
-        burn_enabled: bool,
     },
     ContractStatus {
         status: ContractStatusLevel,
@@ -433,9 +472,6 @@ pub enum QueryAnswer {
     ViewingKeyError {
         msg: String,
     },
-    Minters {
-        minters: Vec<HumanAddr>,
-    },
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
@@ -454,23 +490,26 @@ pub enum ResponseStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ContractStatusLevel {
     NormalRun,
-    StopAllButRedeems,
+    StopBonding,
+    StopAllButUnbond, //Can set time to 0 for instant unbond
     StopAll,
 }
 
 pub fn status_level_to_u8(status_level: ContractStatusLevel) -> u8 {
     match status_level {
         ContractStatusLevel::NormalRun => 0,
-        ContractStatusLevel::StopAllButRedeems => 1,
-        ContractStatusLevel::StopAll => 2,
+        ContractStatusLevel::StopBonding => 1,
+        ContractStatusLevel::StopAllButUnbond => 2,
+        ContractStatusLevel::StopAll => 3,
     }
 }
 
 pub fn u8_to_status_level(status_level: u8) -> StdResult<ContractStatusLevel> {
     match status_level {
         0 => Ok(ContractStatusLevel::NormalRun),
-        1 => Ok(ContractStatusLevel::StopAllButRedeems),
-        2 => Ok(ContractStatusLevel::StopAll),
+        1 => Ok(ContractStatusLevel::StopBonding),
+        2 => Ok(ContractStatusLevel::StopAllButUnbond),
+        3 => Ok(ContractStatusLevel::StopAll),
         _ => Err(StdError::generic_err("Invalid state level")),
     }
 }

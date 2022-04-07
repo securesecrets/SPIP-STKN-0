@@ -50,6 +50,24 @@ pub enum TxAction {
     },
     Deposit {},
     Redeem {},
+    Stake {
+        staker: HumanAddr,
+    },
+    AddReward {
+        funder: HumanAddr,
+    },
+    FundUnbond {
+        funder: HumanAddr,
+    },
+    Unbond {
+        staker: HumanAddr,
+    },
+    ClaimUnbond {
+        staker: HumanAddr,
+    },
+    ClaimReward {
+        staker: HumanAddr,
+    },
 }
 
 // Note that id is a globally incrementing counter.
@@ -108,6 +126,12 @@ enum TxCode {
     Burn = 2,
     Deposit = 3,
     Redeem = 4,
+    Stake = 5,
+    AddReward = 6,
+    FundUnbond = 7,
+    Unbond = 8,
+    ClaimUnbond = 9,
+    ClaimReward = 10,
 }
 
 impl TxCode {
@@ -123,6 +147,12 @@ impl TxCode {
             2 => Ok(Burn),
             3 => Ok(Deposit),
             4 => Ok(Redeem),
+            5 => Ok(Stake),
+            6 => Ok(AddReward),
+            7 => Ok(FundUnbond),
+            8 => Ok(Unbond),
+            9 => Ok(ClaimUnbond),
+            10 => Ok(ClaimReward),
             other => Err(StdError::generic_err(format!(
                 "Unexpected Tx code in transaction history: {} Storage is corrupted.",
                 other
@@ -173,10 +203,50 @@ impl StoredTxAction {
             address3: None,
         }
     }
-    fn redeem() -> Self {
+    fn stake(staker: CanonicalAddr) -> Self {
         Self {
-            tx_type: TxCode::Redeem.to_u8(),
-            address1: None,
+            tx_type: TxCode::Stake.to_u8(),
+            address1: Some(staker),
+            address2: None,
+            address3: None,
+        }
+    }
+    fn add_reward(funder: CanonicalAddr) -> Self {
+        Self {
+            tx_type: TxCode::AddReward.to_u8(),
+            address1: Some(funder),
+            address2: None,
+            address3: None,
+        }
+    }
+    fn fund_unbond(funder: CanonicalAddr) -> Self {
+        Self {
+            tx_type: TxCode::FundUnbond.to_u8(),
+            address1: Some(funder),
+            address2: None,
+            address3: None,
+        }
+    }
+    fn unbond(staker: CanonicalAddr) -> Self {
+        Self {
+            tx_type: TxCode::Unbond.to_u8(),
+            address1: Some(staker),
+            address2: None,
+            address3: None,
+        }
+    }
+    fn claim_unbond(staker: CanonicalAddr) -> Self {
+        Self {
+            tx_type: TxCode::ClaimUnbond.to_u8(),
+            address1: Some(staker),
+            address2: None,
+            address3: None,
+        }
+    }
+    fn claim_reward(staker: CanonicalAddr) -> Self {
+        Self {
+            tx_type: TxCode::ClaimReward.to_u8(),
+            address1: Some(staker),
             address2: None,
             address3: None,
         }
@@ -193,6 +263,9 @@ impl StoredTxAction {
         };
         let burn_addr_err = || {
             StdError::generic_err("Missing address in stored Burn transaction. Storage is corrupt")
+        };
+        let staker_addr_err = || {
+            StdError::generic_err("Missing address in stored Stake transaction. Storage is corrupt")
         };
 
         // In all of these, we ignore fields that we don't expect to find populated
@@ -226,6 +299,36 @@ impl StoredTxAction {
             }
             TxCode::Deposit => TxAction::Deposit {},
             TxCode::Redeem => TxAction::Redeem {},
+            TxCode::Stake => {
+                let staker = self.address1.ok_or_else(staker_addr_err)?;
+                let staker = api.human_address(&staker)?;
+                TxAction::Stake { staker }
+            }
+            TxCode::AddReward => {
+                let funder = self.address1.ok_or_else(staker_addr_err)?;
+                let funder = api.human_address(&funder)?;
+                TxAction::AddReward { funder }
+            }
+            TxCode::FundUnbond => {
+                let funder = self.address1.ok_or_else(staker_addr_err)?;
+                let funder = api.human_address(&funder)?;
+                TxAction::FundUnbond { funder }
+            }
+            TxCode::Unbond => {
+                let staker = self.address1.ok_or_else(staker_addr_err)?;
+                let staker = api.human_address(&staker)?;
+                TxAction::Unbond { staker }
+            }
+            TxCode::ClaimUnbond => {
+                let staker = self.address1.ok_or_else(staker_addr_err)?;
+                let staker = api.human_address(&staker)?;
+                TxAction::ClaimUnbond { staker }
+            }
+            TxCode::ClaimReward => {
+                let staker = self.address1.ok_or_else(staker_addr_err)?;
+                let staker = api.human_address(&staker)?;
+                TxAction::ClaimReward { staker }
+            }
         };
 
         Ok(action)
@@ -383,36 +486,110 @@ pub fn store_burn<S: Storage>(
     Ok(())
 }
 
-pub fn store_deposit<S: Storage>(
+pub fn store_stake<S: Storage>(
     store: &mut S,
-    recipient: &CanonicalAddr,
+    staker: &CanonicalAddr,
     amount: Uint128,
     denom: String,
+    memo: Option<String>,
     block: &cosmwasm_std::BlockInfo,
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::deposit();
-    let tx = StoredRichTx::new(id, action, coins, None, block);
+    let action = StoredTxAction::stake(staker.clone());
+    let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, recipient)?;
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }
 
-pub fn store_redeem<S: Storage>(
+pub fn store_add_reward<S: Storage>(
     store: &mut S,
-    redeemer: &CanonicalAddr,
+    staker: &CanonicalAddr,
     amount: Uint128,
     denom: String,
+    memo: Option<String>,
     block: &cosmwasm_std::BlockInfo,
 ) -> StdResult<()> {
     let id = increment_tx_count(store)?;
     let coins = Coin { denom, amount };
-    let action = StoredTxAction::redeem();
-    let tx = StoredRichTx::new(id, action, coins, None, block);
+    let action = StoredTxAction::add_reward(staker.clone());
+    let tx = StoredRichTx::new(id, action, coins, memo, block);
 
-    append_tx(store, &tx, redeemer)?;
+    append_tx(store, &tx, staker)?;
+
+    Ok(())
+}
+
+pub fn store_fund_unbond<S: Storage>(
+    store: &mut S,
+    staker: &CanonicalAddr,
+    amount: Uint128,
+    denom: String,
+    memo: Option<String>,
+    block: &cosmwasm_std::BlockInfo,
+) -> StdResult<()> {
+    let id = increment_tx_count(store)?;
+    let coins = Coin { denom, amount };
+    let action = StoredTxAction::fund_unbond(staker.clone());
+    let tx = StoredRichTx::new(id, action, coins, memo, block);
+
+    append_tx(store, &tx, staker)?;
+
+    Ok(())
+}
+
+pub fn store_unbond<S: Storage>(
+    store: &mut S,
+    staker: &CanonicalAddr,
+    amount: Uint128,
+    denom: String,
+    memo: Option<String>,
+    block: &cosmwasm_std::BlockInfo,
+) -> StdResult<()> {
+    let id = increment_tx_count(store)?;
+    let coins = Coin { denom, amount };
+    let action = StoredTxAction::unbond(staker.clone());
+    let tx = StoredRichTx::new(id, action, coins, memo, block);
+
+    append_tx(store, &tx, staker)?;
+
+    Ok(())
+}
+
+pub fn store_claim_unbond<S: Storage>(
+    store: &mut S,
+    staker: &CanonicalAddr,
+    amount: Uint128,
+    denom: String,
+    memo: Option<String>,
+    block: &cosmwasm_std::BlockInfo,
+) -> StdResult<()> {
+    let id = increment_tx_count(store)?;
+    let coins = Coin { denom, amount };
+    let action = StoredTxAction::claim_unbond(staker.clone());
+    let tx = StoredRichTx::new(id, action, coins, memo, block);
+
+    append_tx(store, &tx, staker)?;
+
+    Ok(())
+}
+
+pub fn store_claim_reward<S: Storage>(
+    store: &mut S,
+    staker: &CanonicalAddr,
+    amount: Uint128,
+    denom: String,
+    memo: Option<String>,
+    block: &cosmwasm_std::BlockInfo,
+) -> StdResult<()> {
+    let id = increment_tx_count(store)?;
+    let coins = Coin { denom, amount };
+    let action = StoredTxAction::claim_reward(staker.clone());
+    let tx = StoredRichTx::new(id, action, coins, memo, block);
+
+    append_tx(store, &tx, staker)?;
 
     Ok(())
 }

@@ -1,7 +1,9 @@
 use std::any::type_name;
 use std::convert::TryFrom;
 
-use cosmwasm_std::{CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage};
+use cosmwasm_std::{
+    CanonicalAddr, HumanAddr, ReadonlyStorage, StdError, StdResult, Storage,
+};
 use cosmwasm_storage::{PrefixedStorage, ReadonlyPrefixedStorage};
 
 use secret_toolkit::storage::{TypedStore, TypedStoreMut};
@@ -13,6 +15,7 @@ use crate::msg::{status_level_to_u8, u8_to_status_level, ContractStatusLevel};
 use crate::viewing_key::ViewingKey;
 use serde::de::DeserializeOwned;
 
+// Snip20
 pub static CONFIG_KEY: &[u8] = b"config";
 pub const PREFIX_TXS: &[u8] = b"transfers";
 
@@ -39,14 +42,6 @@ pub struct Constants {
     pub prng_seed: Vec<u8>,
     // privacy configuration
     pub total_supply_is_public: bool,
-    // is deposit enabled
-    pub deposit_is_enabled: bool,
-    // is redeem enabled
-    pub redeem_is_enabled: bool,
-    // is mint enabled
-    pub mint_is_enabled: bool,
-    // is burn enabled
-    pub burn_is_enabled: bool,
     // the address of this contract, used to validate query permits
     pub contract_address: HumanAddr,
 }
@@ -92,7 +87,7 @@ fn ser_bin_data<T: Serialize>(obj: &T) -> StdResult<Vec<u8>> {
 }
 
 fn deser_bin_data<T: DeserializeOwned>(data: &[u8]) -> StdResult<T> {
-    bincode2::deserialize::<T>(&data).map_err(|e| StdError::serialize_err(type_name::<T>(), e))
+    bincode2::deserialize::<T>(data).map_err(|e| StdError::serialize_err(type_name::<T>(), e))
 }
 
 fn set_bin_data<T: Serialize, S: Storage>(storage: &mut S, key: &[u8], data: &T) -> StdResult<()> {

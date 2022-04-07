@@ -1,5 +1,5 @@
 [package]
-name = "spip-stkn-0"
+name = "spip_stkd_0"
 version = "0.1.0"
 authors = ["Guy <guyg@securesecrets.org>"]
 edition = "2018"
@@ -45,5 +45,14 @@ rand_chacha = { version = "0.2.2", default-features = false }
 rand_core = { version = "0.5.1", default-features = false }
 sha2 = { version = "0.9.1", default-features = false }
 
+shade-protocol = { git = "https://github.com/securesecrets/shade", branch = "staking/snip20-interface", features = ["shd_staking", "snip20", "storage"] }
+
+# Temp Uint replacement
+secret-cosmwasm-math-compat = { git = "https://github.com/chris-ricketts/secret-cosmwasm-math-compat.git" }
+
+# Large number math
+ethnum = "1.1.1"
+
 [dev-dependencies]
 cosmwasm-schema = { version = "0.9.2" }
+rand = "0.8.4"

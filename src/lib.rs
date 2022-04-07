@@ -1,9 +1,14 @@
 mod batch;
 pub mod contract;
+mod distributors;
+mod expose_balance;
 pub mod msg;
 mod rand;
 pub mod receiver;
+mod stake;
+mod stake_queries;
 pub mod state;
+mod state_staking;
 mod transaction_history;
 mod utils;
 mod viewing_key;
