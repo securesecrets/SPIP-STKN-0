@@ -45,7 +45,8 @@ rand_chacha = { version = "0.2.2", default-features = false }
 rand_core = { version = "0.5.1", default-features = false }
 sha2 = { version = "0.9.1", default-features = false }
 
-shade-protocol = { git = "https://github.com/securesecrets/shade", branch = "staking/snip20-interface", features = ["shd_staking", "snip20", "storage"] }
+shade-protocol = { git = "https://github.com/securesecrets/shade", branch = "governance/SPIP-implementation", features = ["shd_staking", "snip20", "storage"] }
+#shade-protocol = { version = "0.1.0", path = "../../packages/shade_protocol", features = ["shd_staking", "snip20", "storage"] }
 
 # Temp Uint replacement
 secret-cosmwasm-math-compat = { git = "https://github.com/chris-ricketts/secret-cosmwasm-math-compat.git" }
